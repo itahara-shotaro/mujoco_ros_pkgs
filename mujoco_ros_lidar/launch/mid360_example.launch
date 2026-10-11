@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="modelfile"            default="$(find mujoco_ros_lidar)/assets/lidar_world.xml"              doc="MuJoCo xml file to load. Should define robot model and world." />
+  <arg name="mujoco_plugin_config" default="$(find mujoco_ros_lidar)/config/mid360_example_config.yaml" doc="Optionally provide the path to a yaml with plugin configurations to load" />
+  <arg name="verbose" default="false" />
+  <arg name="rviz"    default="false" doc="Open RViz showing the point cloud in the sensor frame" />
+
+  <env name="ROSCONSOLE_FORMAT" value="[${severity}] [${time}] [${logger}] [${node}]: ${message}"/>
+  <env if="$(arg verbose)" name="ROSCONSOLE_CONFIG_FILE"
+       value="$(find mujoco_ros)/config/rosconsole.config"/>
+
+  <include file="$(find mujoco_ros)/launch/launch_server.launch" pass_all_args="true">
+    <arg name="use_sim_time" value="true" />
+  </include>
+
+  <node if="$(arg rviz)" pkg="rviz" type="rviz" name="rviz" args="-d $(find mujoco_ros_lidar)/config/mid360.rviz" />
+</launch>

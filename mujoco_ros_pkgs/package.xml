@@ -22,6 +22,7 @@
     <exec_depend>mujoco_ros_sensors</exec_depend>
     <exec_depend>mujoco_ros_mocap</exec_depend>
     <exec_depend>mujoco_ros_laser</exec_depend>
+    <exec_depend>mujoco_ros_lidar</exec_depend>
 
     <export>
         <metapackage condition="$ROS_VERSION == 1" />
