@@ -1,29 +1,14 @@
-set(_MUJOCO_ROS_PREFIX "@MUJOCO_DIR@")
-if(_MUJOCO_ROS_PREFIX STREQUAL "")
-  message(FATAL_ERROR "mujoco_ros: configured MuJoCo root is empty")
-endif()
-
-find_library(_MUJOCO_ROS_MUJOCO_LIB
-  NAMES mujoco libmujoco.so
-  PATHS "${_MUJOCO_ROS_PREFIX}/lib"
-  NO_DEFAULT_PATH
-)
-
-if(NOT _MUJOCO_ROS_MUJOCO_LIB)
-  message(FATAL_ERROR "mujoco_ros: installed libmujoco not found under ${_MUJOCO_ROS_PREFIX}/lib")
-endif()
+# MuJoCo is provided by the `mujoco` catkin package (e.g. mujoco_catkin), so downstream packages
+# only need `catkin build` without pointing MUJOCO_DIR at an external installation.
+find_package(mujoco REQUIRED)
 
 if(NOT TARGET mujoco::mujoco)
-  add_library(mujoco::mujoco SHARED IMPORTED GLOBAL)
+  add_library(mujoco::mujoco INTERFACE IMPORTED GLOBAL)
   set_target_properties(mujoco::mujoco PROPERTIES
-    IMPORTED_LOCATION "${_MUJOCO_ROS_MUJOCO_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${_MUJOCO_ROS_PREFIX}/include"
+    INTERFACE_INCLUDE_DIRECTORIES "${mujoco_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${mujoco_LIBRARIES}"
   )
 endif()
-
-set(mujoco_FOUND TRUE)
-set(mujoco_INCLUDE_DIRS "${_MUJOCO_ROS_PREFIX}/include")
-set(mujoco_LIBRARIES mujoco::mujoco)
 
 if("@_MUJOCO_RESOLVED_OFFSCREEN_BACKEND@" STREQUAL "OSMESA")
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")

@@ -61,10 +61,9 @@ if (ROS_VERSION EQUAL "1")
     find_package(pybind11_catkin REQUIRED)
   endif()
 
-  # Find MuJoCo
-  find_package(mujoco 3.3.5 REQUIRED)
+  # Find MuJoCo (provided by the `mujoco` catkin package)
+  find_package(mujoco REQUIRED)
   find_package(tinyxml2 REQUIRED)
-  include(InstallMujocoToWorkspace)
 else()
   find_package(ament_cmake REQUIRED)
   find_package(ament_cmake_python REQUIRED)
