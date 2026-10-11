@@ -39,10 +39,13 @@
 #include <mujoco_ros/ros_version.hpp>
 
 #if MJR_ROS_VERSION == ROS_1
+#include <boost/function.hpp>
 #include <ros/package.h>
 #include <ros/ros.h>
+#include <sensor_msgs/Image.h>
 #else // MJR_ROS_VERSION == ROS_2
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #endif
 
 #include <mujoco_ros_testing_utils/mujoco_env_fixture.hpp>
@@ -50,7 +53,18 @@
 
 #include <mujoco_ros/render_backend.hpp>
 #include <mujoco_ros/mujoco_env.hpp>
+#include <mujoco_ros/offscreen_camera.hpp>
+#include <mujoco_ros/offscreen_camera_config.hpp>
+#include <mujoco_ros/util.hpp>
+#if MJR_ROS_VERSION == ROS_2
+#include <mujoco_ros/ros_two/plugin_utils.hpp>
+#endif
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 int main(int argc, char **argv)
 {
@@ -76,11 +90,21 @@ int main(int argc, char **argv)
 #endif
 }
 
+template <typename Func>
+decltype(auto) WithTestPlugin(MujocoEnvTestWrapper *env, Func &&func)
+{
+#if MJR_ROS_VERSION == ROS_1
+	return env->WithBackendPlugin<TestPlugin>("mujoco_ros/TestPlugin", "mujoco_ros/TestPlugin",
+	                                          std::forward<Func>(func));
+#else
+	return env->WithBackendPlugin<TestPlugin>("test_plugin", "mujoco_ros/TestPlugin", std::forward<Func>(func));
+#endif
+}
+
 class LoadedPluginFixture : public ::testing::Test
 {
 protected:
 	std::unique_ptr<testing::TestNodeHandle> nh;
-	TestPlugin *test_plugin = nullptr;
 	MujocoEnvTestWrapper *env_ptr;
 
 	void SetUp() override
@@ -102,22 +126,13 @@ protected:
 		}
 		EXPECT_LT(seconds, 2) << "Env loading ran into 2 seconds timeout!";
 
-		auto &plugins = env_ptr->GetPlugins();
-		for (const auto &p : plugins) {
-			test_plugin = dynamic_cast<TestPlugin *>(p.get());
-			if (test_plugin != nullptr) {
-				break;
-			}
-		}
-
-		ASSERT_NE(test_plugin, nullptr) << "TestPlugin not found!";
+		ASSERT_NO_THROW(WithTestPlugin(env_ptr, [](TestPlugin *) {}));
 	}
 
 	void TearDown() override
 	{
 		// cleanup all parameters
 		nh->deleteParam(nh->getNamespace());
-		test_plugin = nullptr;
 		env_ptr->shutdown();
 		delete env_ptr;
 	}
@@ -130,7 +145,7 @@ TEST_F(LoadedPluginFixture, ControlCallback)
 	// timing is too slow
 	// EXPECT_FALSE(test_plugin->ran_control_cb.load());
 	EXPECT_TRUE(env_ptr->step());
-	EXPECT_TRUE(test_plugin->ran_control_cb.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_control_cb.load(); }));
 }
 
 TEST_F(LoadedPluginFixture, PassiveCallback)
@@ -140,11 +155,12 @@ TEST_F(LoadedPluginFixture, PassiveCallback)
 	// timing is too slow
 	// EXPECT_FALSE(test_plugin->ran_passive_cb.load());
 	EXPECT_TRUE(env_ptr->step());
-	EXPECT_TRUE(test_plugin->ran_passive_cb.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_passive_cb.load(); }));
 }
 
 #if MJR_ROS_VERSION == ROS_1
-#if RENDER_BACKEND == GLFW_BACKEND || RENDER_BACKEND == EGL_BACKEND || RENDER_BACKEND == OSMESA_BACKEND
+#if OFFSCREEN_RENDER_BACKEND == EGL_BACKEND || OFFSCREEN_RENDER_BACKEND == OSMESA_BACKEND || \
+    OFFSCREEN_RENDER_BACKEND == GLFW_BACKEND
 TEST_F(BaseEnvFixture, RenderCallback)
 {
 	nh->setParam("no_render", false);
@@ -164,23 +180,13 @@ TEST_F(BaseEnvFixture, RenderCallback)
 
 	EXPECT_TRUE(env_ptr->step());
 
-	OffscreenRenderContext *offscreen = env_ptr->getOffscreenContext();
+	CameraPublicationTransport *offscreen = env_ptr->getCameraPublicationTransport();
 	EXPECT_TRUE(offscreen->cams.size() == 1);
-
-	TestPlugin *test_plugin = nullptr;
-	auto &plugins           = env_ptr->GetPlugins();
-	for (const auto &p : plugins) {
-		test_plugin = dynamic_cast<TestPlugin *>(p.get());
-		if (test_plugin != nullptr) {
-			break;
-		}
-	}
-
-	ASSERT_NE(test_plugin, nullptr) << "TestPlugin not found!";
 
 	// wait for render callback to be called
 	float seconds = 0;
-	while (!test_plugin->ran_render_cb.load() && seconds < 1.) {
+	while (!WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_render_cb.load(); }) &&
+	       seconds < 1.) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
@@ -190,7 +196,7 @@ TEST_F(BaseEnvFixture, RenderCallback)
 }
 #endif
 
-#if RENDER_BACKEND == NO_BACKEND
+#if OFFSCREEN_RENDER_BACKEND == NO_BACKEND
 TEST_F(BaseEnvFixture, RenderCallback_NoRender)
 {
 	nh->setParam("no_render", false);
@@ -208,40 +214,181 @@ TEST_F(BaseEnvFixture, RenderCallback_NoRender)
 	env_ptr->StartWithXML(xml_path);
 	EXPECT_TRUE(env_ptr->step(5));
 
-	TestPlugin *test_plugin = nullptr;
-	auto &plugins           = env_ptr->GetPlugins();
-	for (const auto &p : plugins) {
-		test_plugin = dynamic_cast<TestPlugin *>(p.get());
-		if (test_plugin != nullptr) {
-			break;
-		}
-	}
-
 	// wait for render callback to be called
 	float seconds = 0;
-	while (!test_plugin->ran_render_cb.load() && seconds < .1) {
+	while (!WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_render_cb.load(); }) &&
+	       seconds < .1) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
-	EXPECT_FALSE(test_plugin->ran_render_cb.load()) << "Render callback was called!";
+	EXPECT_FALSE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_render_cb.load(); }))
+	    << "Render callback was called!";
 
 	env_ptr->shutdown();
 }
 #endif
 #endif // MJR_ROS_VERSION == ROS_1
 
+TEST_F(BaseEnvFixture, NoOffscreenDemandSkipsPluginRenderCallback)
+{
+	nh->setParam("no_render", false);
+	nh->setParam("unpause", false);
+	nh->setParam("headless", true);
+	nh->setParam("render_offscreen", true);
+	nh->setParam("cam_config/test_cam/stream_type", rendering::StreamType::RGB);
+
+	env_ptr = std::make_unique<MujocoEnvTestWrapper>(nh.get());
+	env_ptr->StartWithXML(testing::get_test_model_path("camera_world.xml"));
+	ASSERT_EQ(env_ptr->GetOperationalStatus(), 0);
+	auto *offscreen = env_ptr->getCameraPublicationTransport();
+	if (!offscreen->ActiveRenderCore()) {
+		GTEST_SKIP() << "offscreen RenderCore is unavailable for this backend";
+	}
+	ASSERT_EQ(offscreen->cams.size(), 1U);
+
+	ASSERT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) {
+		plugin->ran_render_cb.store(false);
+		return true;
+	}));
+	ASSERT_TRUE(env_ptr->step());
+	EXPECT_FALSE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_render_cb.load(); }));
+}
+
+TEST_F(BaseEnvFixture, DueRosDemandRunsPluginRenderCallbackAndPublishesCapture)
+{
+	nh->setParam("no_render", false);
+	nh->setParam("unpause", false);
+	nh->setParam("headless", true);
+	nh->setParam("render_offscreen", true);
+	nh->setParam("cam_config/test_cam/stream_type", rendering::StreamType::RGB);
+
+#if MJR_ROS_VERSION == ROS_1
+	boost::function<void(const sensor_msgs::Image::ConstPtr &)> image_callback =
+	    [](const sensor_msgs::Image::ConstPtr &) {};
+	auto image_subscriber = nh->subscribe<sensor_msgs::Image>("cameras/test_cam/rgb/image_raw", 1, image_callback);
+#endif
+	env_ptr = std::make_unique<MujocoEnvTestWrapper>(nh.get());
+#if MJR_ROS_VERSION == ROS_2
+	auto observer_node = std::make_shared<rclcpp::Node>("render_demand_observer");
+	env_ptr->AddNodeToExecutor(observer_node->get_node_base_interface());
+	auto image_subscriber = observer_node->create_subscription<sensor_msgs::msg::Image>(
+	    env_ptr->GetHandleNamespace() + "/cameras/test_cam/rgb/image_raw", rclcpp::SensorDataQoS(),
+	    [](const sensor_msgs::msg::Image::ConstSharedPtr) {});
+#endif
+	env_ptr->StartWithXML(testing::get_test_model_path("camera_world.xml"));
+	ASSERT_EQ(env_ptr->GetOperationalStatus(), 0);
+	auto *offscreen = env_ptr->getCameraPublicationTransport();
+	if (!offscreen->ActiveRenderCore()) {
+		GTEST_SKIP() << "offscreen RenderCore is unavailable for this backend";
+	}
+	ASSERT_EQ(offscreen->cams.size(), 1U);
+
+	{
+		std::lock_guard<MujocoEnvMutex> lock(*env_ptr->getMutexPtr());
+		env_ptr->getModelPtr()->opt.timestep = 2.094;
+	}
+	const auto subscriber_deadline = Clock::now() + std::chrono::seconds(2);
+	while (offscreen->cams.front()->rgb_pub_.getNumSubscribers() == 0 && Clock::now() < subscriber_deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	ASSERT_EQ(offscreen->cams.front()->rgb_pub_.getNumSubscribers(), 1U);
+	const auto capture_id_before = offscreen->cams.front()->last_published_capture_id();
+	ASSERT_EQ(capture_id_before, 0U);
+	ASSERT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) {
+		plugin->ran_render_cb.store(false);
+		return true;
+	}));
+	ASSERT_TRUE(env_ptr->step());
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_render_cb.load(); }));
+	EXPECT_EQ(offscreen->cams.front()->last_published_capture_id(), capture_id_before + 1U);
+	const auto expected_nanoseconds = util::simTimeToNanoseconds(env_ptr->getDataPtr()->time);
+	mjtNum simulation_time_seconds  = static_cast<mjtNum>(expected_nanoseconds) / 1e9;
+	const auto float_roundtrip_ns   = static_cast<std::int64_t>(simulation_time_seconds * 1e9);
+	ASSERT_NE(float_roundtrip_ns, expected_nanoseconds)
+	    << "test timestep must not round-trip through mjtNum without nanosecond loss";
+#if MJR_ROS_VERSION == ROS_1
+	const auto published_ns = static_cast<std::int64_t>(offscreen->cams.front()->last_pub_.toNSec());
+	EXPECT_EQ(published_ns, util::toRosTime(expected_nanoseconds).toNSec());
+	EXPECT_NE(published_ns, float_roundtrip_ns);
+#else
+	const auto published_ns = offscreen->cams.front()->last_pub_.nanoseconds();
+	EXPECT_EQ(published_ns, util::toRosTime(expected_nanoseconds).nanoseconds());
+	EXPECT_NE(published_ns, float_roundtrip_ns);
+#endif
+}
+
+TEST_F(BaseEnvFixture, PluginReadsNewOffscreenLeaseFromLastStage)
+{
+	nh->setParam("no_render", false);
+	nh->setParam("unpause", false);
+	nh->setParam("headless", true);
+	nh->setParam("render_offscreen", true);
+	nh->setParam("cam_config/test_cam/stream_type", rendering::StreamType::RGB);
+	nh->setParam("test_plugin_offscreen_frames", true);
+
+	env_ptr = std::make_unique<MujocoEnvTestWrapper>(nh.get());
+	env_ptr->StartWithXML(testing::get_test_model_path("camera_world.xml"));
+	ASSERT_EQ(env_ptr->GetOperationalStatus(), 0);
+	auto *offscreen = env_ptr->getCameraPublicationTransport();
+	if (!offscreen->ActiveRenderCore()) {
+		GTEST_SKIP() << "offscreen RenderCore is unavailable for this backend";
+	}
+
+	ASSERT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) {
+		plugin->saw_lease.store(false);
+		plugin->capture_id.store(0);
+		plugin->simulation_time_ns.store(0);
+		plugin->second_take_empty.store(false);
+		return true;
+	}));
+	ASSERT_TRUE(env_ptr->step(2));
+
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->saw_lease.load(); }));
+	EXPECT_GT(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->capture_id.load(); }), 0U);
+	EXPECT_GT(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->simulation_time_ns.load(); }), 0);
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->second_take_empty.load(); }));
+	EXPECT_FALSE(
+	    WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->test_cam_geom_group_2_enabled.load(); }));
+
+	env_ptr->shutdown();
+}
+
 TEST_F(LoadedPluginFixture, LastCallback)
 {
-	EXPECT_FALSE(test_plugin->ran_last_cb.load());
+	EXPECT_FALSE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_last_cb.load(); }));
 	EXPECT_TRUE(env_ptr->step());
-	EXPECT_TRUE(test_plugin->ran_last_cb.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_last_cb.load(); }));
 }
 
 TEST_F(LoadedPluginFixture, OnGeomChangedCallback)
 {
-	EXPECT_FALSE(test_plugin->ran_on_geom_changed_cb.load());
+	EXPECT_FALSE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_on_geom_changed_cb.load(); }));
 	env_ptr->NotifyGeomChange();
-	EXPECT_TRUE(test_plugin->ran_on_geom_changed_cb.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_on_geom_changed_cb.load(); }));
+}
+
+TEST_F(LoadedPluginFixture, ReloadObserverThrowQuiescesPluginHostBeforeModelCleanup)
+{
+	std::atomic_bool observer_called{ false };
+	env_ptr->SetReloadObserver([&](MujocoEnv::ReloadPhase phase) {
+		if (phase == MujocoEnv::ReloadPhase::kRenderReconfigureStarted) {
+			observer_called.store(true);
+			throw std::runtime_error("deterministic plugin reload observer failure");
+		}
+	});
+
+	env_ptr->load_queued_model();
+	ASSERT_TRUE(env_ptr->WaitForOperationalStatusIdle(std::chrono::seconds(2)))
+	    << "observer-throw reload did not return to an idle lifecycle";
+	EXPECT_TRUE(observer_called.load());
+	EXPECT_TRUE(env_ptr->isEventRunning()) << "observer exception terminated the event loop";
+	EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 0) << "PluginHost retained adapters after model/data cleanup";
+	EXPECT_THROW(WithTestPlugin(env_ptr, [](TestPlugin *) {}), std::runtime_error)
+	    << "an old Plugin Generation remained active after reload failure";
+
+	env_ptr->requestShutdown();
+	env_ptr->WaitForEventsJoin();
+	EXPECT_FALSE(env_ptr->isEventRunning());
 }
 
 TEST_F(BaseEnvFixture, LoadPlugin)
@@ -259,7 +406,7 @@ TEST_F(BaseEnvFixture, LoadPlugin)
 		seconds += 0.001;
 	}
 	EXPECT_LT(seconds, 2) << "Env loading ran into 2 seconds timeout!";
-	EXPECT_EQ(env_ptr->GetPlugins().size(), 1) << "Env should have 1 plugin registered!";
+	EXPECT_EQ(env_ptr->GetPluginStats().size(), 1) << "Env should have 1 plugin registered!";
 	EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 1) << "Env should have 1 plugin loaded!";
 
 	env_ptr->shutdown();
@@ -267,33 +414,34 @@ TEST_F(BaseEnvFixture, LoadPlugin)
 
 TEST_F(LoadedPluginFixture, ResetPlugin)
 {
-	env_ptr->settings_.reset_request = 1;
-	float seconds                    = 0;
-	while (env_ptr->settings_.reset_request != 0 && seconds < 2) {
+	env_ptr->RequestReset();
+	float seconds = 0;
+	while (!WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_reset.load(); }) && seconds < 2) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
-	EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
 	env_ptr->step(10);
 
-	EXPECT_TRUE(test_plugin->ran_reset.load()) << "Dummy plugin reset was not called!";
+	EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->ran_reset.load(); }))
+	    << "Dummy plugin reset was not called!";
 }
 
 TEST_F(LoadedPluginFixture, GetConfigToplevel)
 {
-	EXPECT_TRUE(test_plugin->got_config_param.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->got_config_param.load(); }));
 }
 
 TEST_F(LoadedPluginFixture, GetConfigArray)
 {
-	EXPECT_TRUE(test_plugin->got_lvl1_nested_array.load());
-	EXPECT_TRUE(test_plugin->got_lvl2_nested_array.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->got_lvl1_nested_array.load(); }));
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->got_lvl2_nested_array.load(); }));
 }
 
 TEST_F(LoadedPluginFixture, GetConfigStruct)
 {
-	EXPECT_TRUE(test_plugin->got_lvl1_nested_struct.load());
-	EXPECT_TRUE(test_plugin->got_lvl2_nested_struct.load());
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->got_lvl1_nested_struct.load(); }));
+	EXPECT_TRUE(WithTestPlugin(env_ptr, [](TestPlugin *plugin) { return plugin->got_lvl2_nested_struct.load(); }));
 }
 
 TEST_F(BaseEnvFixture, FailedLoad)
@@ -313,28 +461,9 @@ TEST_F(BaseEnvFixture, FailedLoad)
 	}
 	EXPECT_LT(seconds, 2) << "Env loading ran into 2 seconds timeout!";
 
-	EXPECT_EQ(env_ptr->GetPlugins().size(), 1) << "Env should have 1 plugin registered!";
+	EXPECT_EQ(env_ptr->GetPluginStats().size(), 1) << "Env should have 1 plugin registered!";
 	EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 0) << "Env should have 0 plugins loaded!";
-
-	{
-		TestPlugin *test_plugin = nullptr;
-
-		auto &plugins = env_ptr->GetPlugins();
-		for (const auto &p : plugins) {
-			test_plugin = dynamic_cast<TestPlugin *>(p.get());
-			if (test_plugin != nullptr) {
-				break;
-			}
-		}
-
-		ASSERT_NE(test_plugin, nullptr) << "Dummy plugin was not loaded!";
-
-		EXPECT_FALSE(test_plugin->ran_control_cb.load());
-		EXPECT_FALSE(test_plugin->ran_passive_cb.load());
-		EXPECT_FALSE(test_plugin->ran_render_cb.load());
-		EXPECT_FALSE(test_plugin->ran_last_cb.load());
-		EXPECT_FALSE(test_plugin->ran_on_geom_changed_cb.load());
-	}
+	EXPECT_EQ(env_ptr->GetPluginStats().front().type, "mujoco_ros/TestPlugin");
 
 	env_ptr->shutdown();
 }
@@ -355,37 +484,131 @@ TEST_F(BaseEnvFixture, FailedLoadRecoverReload)
 	}
 	EXPECT_LT(seconds, 2) << "Env loading ran into 2 seconds timeout!";
 
-	EXPECT_EQ(env_ptr->GetPlugins().size(), 1) << "Env should have 1 plugin registered!";
+	EXPECT_EQ(env_ptr->GetPluginStats().size(), 1) << "Env should have 1 plugin registered!";
 	EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 0) << "Env should have 0 plugins loaded!";
 
 	{
-		TestPlugin *test_plugin = nullptr;
-
-		auto &plugins = env_ptr->GetPlugins();
-		for (const auto &p : plugins) {
-			test_plugin = dynamic_cast<TestPlugin *>(p.get());
-			if (test_plugin != nullptr) {
-				break;
-			}
-		}
-
-		ASSERT_NE(test_plugin, nullptr) << "Dummy plugin was not loaded!";
-
 		nh->setParam("should_fail", false);
 #if MJR_ROS_VERSION == ROS_2
 		env_ptr->set_parameters({ rclcpp::Parameter("should_fail", false) });
 #endif
 
-		env_ptr->settings_.load_request = 2;
-		float seconds                   = 0;
+		env_ptr->load_queued_model();
+		float seconds = 0;
 		while (env_ptr->GetOperationalStatus() != 0 && seconds < 2) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			seconds += 0.001;
 		}
 		EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
-		EXPECT_EQ(env_ptr->GetPlugins().size(), 1) << "Env should have 1 plugin registered!";
+		EXPECT_EQ(env_ptr->GetPluginStats().size(), 1) << "Env should have 1 plugin registered!";
 		EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 1) << "Env should have 1 plugin loaded!";
 	}
+
+	env_ptr->shutdown();
+}
+
+TEST_F(BaseEnvFixture, ReloadRejectsOldPluginGenerationAndActivatesOnlyNewCallbacks)
+{
+	nh->setParam("unpause", false);
+	const std::string xml_path = testing::get_test_model_path("empty_world.xml");
+	env_ptr                    = std::make_unique<MujocoEnvTestWrapper>(nh.get());
+	env_ptr->StartWithXML(xml_path);
+
+	PluginGeneration old_generation;
+	env_ptr->WithPluginAccess(
+	    [&old_generation](const ScopedPluginAccess &access) { old_generation = access.Generation(); });
+
+	env_ptr->load_queued_model();
+	EXPECT_THROW(env_ptr->WithPluginAccess(old_generation, [](const ScopedPluginAccess &) {}), std::runtime_error);
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) {
+		plugin->ran_control_cb.store(false);
+		return true;
+	}));
+	env_ptr->step();
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_control_cb.load(); }));
+
+	env_ptr->shutdown();
+}
+
+TEST_F(BaseEnvFixture, ReloadHasDeterministicGenerationBoundaryAndCallbackOrder)
+{
+	nh->setParam("unpause", false);
+	const std::string xml_path = testing::get_test_model_path("empty_world.xml");
+	env_ptr                    = std::make_unique<MujocoEnvTestWrapper>(nh.get());
+	env_ptr->StartWithXML(xml_path);
+
+	ASSERT_TRUE(env_ptr->step());
+	ASSERT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_control_cb.load(); }));
+
+	PluginGeneration old_generation;
+	env_ptr->WithPluginAccess(
+	    [&old_generation](const ScopedPluginAccess &access) { old_generation = access.Generation(); });
+	const int previous_loads        = TestPlugin::load_count.load();
+	const int previous_destructions = TestPlugin::destruction_count.load();
+	std::mutex mutex;
+	std::condition_variable condition;
+	std::vector<std::string> events{ "old_callback" };
+	int ready_at_forward = -1;
+	int ready_after_load = -1;
+	PluginGeneration new_generation;
+	bool old_generation_rejected = false;
+
+	env_ptr->SetReloadObserver([&](MujocoEnv::ReloadPhase phase) {
+		std::lock_guard<std::mutex> lock(mutex);
+		switch (phase) {
+			case MujocoEnv::ReloadPhase::kRenderQuiescenceStarted:
+				break;
+			case MujocoEnv::ReloadPhase::kRenderTurnsIdle:
+				break;
+			case MujocoEnv::ReloadPhase::kRenderReconfigureStarted:
+				break;
+			case MujocoEnv::ReloadPhase::kOldGenerationQuiesced:
+				ASSERT_GT(TestPlugin::destruction_count.load(), previous_destructions);
+				EXPECT_THROW(env_ptr->WithPluginAccess(old_generation, [](const ScopedPluginAccess &) {}),
+				             std::runtime_error);
+				old_generation_rejected = true;
+				events.emplace_back("old_destroyed");
+				break;
+			case MujocoEnv::ReloadPhase::kModelSwapped:
+				events.emplace_back("model_swapped");
+				break;
+			case MujocoEnv::ReloadPhase::kForwarded:
+				ready_at_forward = env_ptr->GetNumCBReadyPlugins();
+				events.emplace_back("forwarded");
+				break;
+			case MujocoEnv::ReloadPhase::kNewGenerationLoaded:
+				ready_after_load = env_ptr->GetNumCBReadyPlugins();
+				env_ptr->WithPluginAccess(
+				    [&new_generation](const ScopedPluginAccess &access) { new_generation = access.Generation(); });
+				events.emplace_back("new_loaded");
+				break;
+			case MujocoEnv::ReloadPhase::kReloadFailed:
+				break;
+		}
+		condition.notify_all();
+	});
+
+	env_ptr->requestLoad(2);
+	std::unique_lock<std::mutex> lock(mutex);
+	ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(5),
+	                               [&]() { return !events.empty() && events.back() == "new_loaded"; }));
+	lock.unlock();
+	env_ptr->SetReloadObserver({});
+
+	ASSERT_GT(TestPlugin::load_count.load(), previous_loads);
+	ASSERT_TRUE(old_generation_rejected);
+	ASSERT_NE(new_generation, old_generation);
+	ASSERT_EQ(ready_at_forward, 0);
+	ASSERT_EQ(ready_after_load, 1);
+	ASSERT_EQ(events,
+	          (std::vector<std::string>{ "old_callback", "old_destroyed", "model_swapped", "forwarded", "new_loaded" }));
+
+	ASSERT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) {
+		plugin->ran_control_cb.store(false);
+		return true;
+	}));
+	ASSERT_TRUE(env_ptr->step());
+	EXPECT_TRUE(WithTestPlugin(env_ptr.get(), [](TestPlugin *plugin) { return plugin->ran_control_cb.load(); }));
 
 	env_ptr->shutdown();
 }
@@ -407,32 +630,20 @@ TEST_F(BaseEnvFixture, FailedLoadReset)
 	}
 	EXPECT_LT(seconds, 2) << "Env loading ran into 2 seconds timeout!";
 
-	EXPECT_EQ(env_ptr->GetPlugins().size(), 1) << "Env should have 1 plugin registered!";
+	EXPECT_EQ(env_ptr->GetPluginStats().size(), 1) << "Env should have 1 plugin registered!";
 	EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 0) << "Env should have 0 plugins loaded!";
 
 	{
-		TestPlugin *test_plugin = nullptr;
-
-		auto &plugins = env_ptr->GetPlugins();
-		for (const auto &p : plugins) {
-			test_plugin = dynamic_cast<TestPlugin *>(p.get());
-			if (test_plugin != nullptr) {
-				break;
-			}
-		}
-
-		ASSERT_NE(test_plugin, nullptr) << "Dummy plugin was not loaded!";
-
-		env_ptr->settings_.reset_request = 1;
-		float seconds                    = 0;
-		while (env_ptr->settings_.reset_request != 0 && seconds < 2) {
+		env_ptr->RequestReset();
+		float seconds = 0;
+		while (env_ptr->GetControlSnapshot().reset_requested && seconds < 2) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			seconds += 0.001;
 		}
-		EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
 		env_ptr->step(10);
 
-		EXPECT_FALSE(test_plugin->ran_reset.load()) << "Dummy plugin should not have beeon reset!";
+		EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
+		EXPECT_EQ(env_ptr->GetNumCBReadyPlugins(), 0) << "Failed plugin must remain inactive";
 	}
 
 	env_ptr->shutdown();
@@ -440,7 +651,7 @@ TEST_F(BaseEnvFixture, FailedLoadReset)
 
 TEST_F(LoadedPluginFixture, PluginStats_InitialPaused)
 {
-	EXPECT_EQ(env_ptr->settings_.run, 0) << "Env should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Env should be paused!";
 
 // TODO: once this service is added to ROS 2, refactor to hybrid test fixtures, too
 // Tests the GetPluginStats service
@@ -480,7 +691,7 @@ TEST_F(LoadedPluginFixture, PluginStats_InitialPaused)
 
 TEST_F(LoadedPluginFixture, PluginStats_SetTimesOnStep)
 {
-	EXPECT_EQ(env_ptr->settings_.run, 0) << "Env should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Env should be paused!";
 
 	env_ptr->step(1);
 	// sleep for a bit to ensure the plugin callbacks have been called
@@ -525,13 +736,14 @@ TEST_F(LoadedPluginFixture, PluginStats_SetTimesOnStep)
 
 TEST_F(LoadedPluginFixture, PluginStats_ResetTimeOnReset)
 {
-	env_ptr->settings_.reset_request = 1;
-	float seconds                    = 0;
-	while (env_ptr->settings_.reset_request != 0 && seconds < 2) {
+	env_ptr->RequestReset();
+
+	float seconds = 0;
+	while (env_ptr->GetPluginStats().front().reset_time <= -1 && seconds < 2) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
-	EXPECT_LT(seconds, 2) << "Env reset ran into 2 seconds timeout!";
+	EXPECT_LT(seconds, 2) << "Plugin reset stats were not recorded before timeout!";
 
 // TODO: once this service is added to ROS 2, refactor to hybrid test fixtures, too
 // Tests the GetPluginStats service
@@ -557,3 +769,53 @@ TEST_F(LoadedPluginFixture, PluginStats_ResetTimeOnReset)
 	EXPECT_EQ(types[0], "mujoco_ros/TestPlugin") << "Should be TestPlugin!";
 	EXPECT_GT(reset_times[0], -1) << "Reset time should be unset!";
 }
+
+#if MJR_ROS_VERSION == ROS_2
+TEST_F(BaseEnvFixture, RosPluginAdapterFactoryMissingTypeAndUnknownTypeBecomeFailedAdapters)
+{
+	nh->setParam("unpause", false);
+	nh->setParam("no_render", true);
+	nh->setParam("headless", true);
+	nh->setParam("MujocoPlugins.names", std::vector<std::string>{ "missing_type", "bad_type" });
+	nh->setParam("MujocoPlugins.bad_type.type", std::string("mujoco_ros/DoesNotExistPlugin"));
+
+	env_ptr              = std::make_unique<MujocoEnvTestWrapper>("", nh.get());
+	std::string xml_path = testing::get_test_model_path("empty_world.xml");
+	env_ptr->StartWithXML(xml_path);
+	ASSERT_TRUE(env_ptr->WaitForOperationalStatusIdle(std::chrono::seconds(2)))
+	    << "failed plugin adapters left the env non-idle: load_request=" << env_ptr->loadRequest()
+	    << " reset=" << env_ptr->isResetRequested() << " status=" << env_ptr->GetOperationalStatus();
+	ASSERT_EQ(env_ptr->GetOperationalStatus(), 0);
+
+	plugin_utils::RosPluginAdapterFactory factory(env_ptr.get());
+	const auto adapters = factory.CreateAdapters();
+	ASSERT_EQ(adapters.size(), 2u);
+
+	EXPECT_EQ(adapters[0]->Name(), "missing_type");
+	EXPECT_EQ(adapters[0]->Type(), "");
+	{
+		std::string error;
+		EXPECT_FALSE(adapters[0]->Load(nullptr, nullptr, error));
+		EXPECT_EQ(error, "ROS 2 plugin configuration entry is missing type");
+		const auto stats = adapters[0]->Statistics();
+		EXPECT_EQ(stats.name, "missing_type");
+		EXPECT_EQ(stats.type, "");
+	}
+
+	EXPECT_EQ(adapters[1]->Name(), "bad_type");
+	EXPECT_EQ(adapters[1]->Type(), "mujoco_ros/DoesNotExistPlugin");
+	{
+		std::string error;
+		EXPECT_FALSE(adapters[1]->Load(nullptr, nullptr, error));
+		EXPECT_FALSE(error.empty());
+		adapters[1]->Control(nullptr, nullptr);
+		adapters[1]->Passive(nullptr, nullptr);
+		adapters[1]->Render(nullptr, nullptr, nullptr);
+		adapters[1]->LastStage(nullptr, nullptr);
+		adapters[1]->Reset();
+		adapters[1]->GeometryChanged(nullptr, nullptr, 0);
+	}
+
+	env_ptr->shutdown();
+}
+#endif

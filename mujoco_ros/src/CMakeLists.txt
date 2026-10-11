@@ -1,20 +1,18 @@
 # Viewer
 add_library(lodepng OBJECT
-  lodepng.cpp
+  ../third_party/lodepng/lodepng.cpp
 )
 set_property(TARGET lodepng PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_include_directories(lodepng PRIVATE
-  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+target_include_directories(lodepng SYSTEM PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/lodepng
 )
 target_link_libraries(lodepng PRIVATE project_option)
 add_library(mujoco_ros::lodepng ALIAS lodepng)
 
-if(RENDERING_BACKEND STREQUAL "GLFW")
+if(WITH_GUI STREQUAL "ON")
   add_library(platform_ui_adapter OBJECT
     $<TARGET_OBJECTS:lodepng>
     glfw_adapter.cc
-    glfw_dispatch.cc
     platform_ui_adapter.cc
   )
   set_property(TARGET platform_ui_adapter PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -43,12 +41,24 @@ if(ROS_VERSION EQUAL "1")
     ros_one/parameter_interface.cpp
     ros_one/plugin_utils.cpp
     physics.cpp
+    runtime_options.cpp
+    plugin_host.cpp
     interface.cpp
     loading.cpp
     threading.cpp
     offscreen_camera.cpp
+    offscreen_camera_config.cpp
     offscreen_rendering.cpp
     viewer.cpp
+    viewer_branding.cpp
+    viewer_connection_state.cpp
+    viewer_sync_policy.cpp
+    extended_params.cpp
+    description_converter.cpp
+    description_bundle.cpp
+    mesh_uri_prep.cpp
+    glb_visual_prep.cpp
+    ascii_stl_convert.cpp
   )
 else()
   set(MJR_SOURCE_FILES
@@ -58,13 +68,32 @@ else()
     ros_two/parameter_interface.cpp
     ros_two/plugin_utils.cpp
     physics.cpp
+    runtime_options.cpp
+    plugin_host.cpp
     interface.cpp
     loading.cpp
     threading.cpp
     offscreen_camera.cpp
+    offscreen_camera_config.cpp
     offscreen_rendering.cpp
     viewer.cpp
+    viewer_branding.cpp
+    viewer_connection_state.cpp
+    viewer_sync_policy.cpp
+    extended_params.cpp
+    description_converter.cpp
+    description_bundle.cpp
+    mesh_uri_prep.cpp
+    glb_visual_prep.cpp
+    ascii_stl_convert.cpp
   )
+endif()
+
+if(WITH_GUI STREQUAL "ON")
+  if(NOT _MUJOCO_RESOLVED_OFFSCREEN_BACKEND STREQUAL "GLFW")
+    list(APPEND MJR_SOURCE_FILES glfw_dispatch.cc)
+    list(APPEND MJR_SOURCE_FILES rendering/glfw_library.cpp)
+  endif()
 endif()
 
 add_library(${PROJECT_NAME} SHARED
@@ -72,12 +101,15 @@ add_library(${PROJECT_NAME} SHARED
   ${MJR_SOURCE_FILES}
 )
 
-if(RENDERING_BACKEND STREQUAL "GLFW")
+if(WITH_GUI STREQUAL "ON")
   target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:platform_ui_adapter>)
 endif()
 
-if (RENDERING_BACKEND)
-  target_compile_definitions(${PROJECT_NAME} PUBLIC ${RENDERING_BACKEND}=1)
+if(WITH_GUI STREQUAL "ON")
+  target_compile_definitions(${PROJECT_NAME} PUBLIC GLFW=1)
+endif()
+if(BUILD_TESTING OR CATKIN_ENABLE_TESTING)
+  target_compile_definitions(${PROJECT_NAME} PUBLIC MJR_BUILD_TESTING=1)
 endif()
 
 target_include_directories(${PROJECT_NAME}
@@ -87,27 +119,52 @@ target_include_directories(${PROJECT_NAME}
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${GENERATED_HEADERS_DIR}>
     $<INSTALL_INTERFACE:include>
-  PRIVATE
-    ${catkin_INCLUDE_DIRS}
 )
 
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
+  ${catkin_INCLUDE_DIRS}
+)
+
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cgltf
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lodepng
+)
+
+# libGL.so must precede OSMesa on the link line. OSMesa exports gl*; if it
+# loads first, GLFW's context cannot satisfy MuJoCo gladLoadGL.
+if(WITH_GUI STREQUAL "ON")
+  target_link_libraries(${PROJECT_NAME} PUBLIC
+    "-Wl,--no-as-needed" "${MJR_LIBGL}" "-Wl,--as-needed")
+endif()
 target_link_libraries(${PROJECT_NAME}
   PUBLIC
    mujoco::mujoco
+   mujoco_ros_render_core
   PRIVATE
+   tinyxml2::tinyxml2
    project_option
    project_warning
 )
-
+# Public headers expose FrameLease / RenderCore. Dependents must inherit the
+# render_core link (ROS 1 SHARED + ld --as-needed does not follow PRIVATE).
+get_target_property(_mjr_public_libs ${PROJECT_NAME} INTERFACE_LINK_LIBRARIES)
+if(NOT _mjr_public_libs MATCHES "mujoco_ros_render_core")
+  message(FATAL_ERROR
+    "mujoco_ros must PUBLIC-link mujoco_ros_render_core (INTERFACE_LINK_LIBRARIES=${_mjr_public_libs})")
+endif()
 if (ROS_VERSION EQUAL "1")
   target_link_libraries(${PROJECT_NAME}
     PUBLIC
+      ${catkin_LIBRARIES}
+    PRIVATE
       catkin_pkg
+      Boost::program_options
   )
 
 else()
   ament_target_dependencies(${PROJECT_NAME}
     PUBLIC
+      ament_index_cpp
       rclcpp
       rclcpp_lifecycle
       pluginlib
@@ -125,12 +182,8 @@ else()
   )
 endif()
 
-if(RENDERING_BACKEND STREQUAL "GLFW")
+if(WITH_GUI STREQUAL "ON")
   target_link_libraries(${PROJECT_NAME} PRIVATE mujoco_ros::platform_ui_adapter)
-elseif(RENDERING_BACKEND STREQUAL "EGL")
-  target_link_libraries(${PROJECT_NAME} PRIVATE OpenGL::EGL)
-elseif(RENDERING_BACKEND STREQUAL "OSMESA")
-  target_link_libraries(${PROJECT_NAME} PRIVATE OSMesa::OSMesa)
 endif()
 
 add_executable(mujoco_node
@@ -143,6 +196,9 @@ target_link_libraries(mujoco_node
     project_option
     project_warning
 )
+if (ROS_VERSION EQUAL "1")
+  target_link_libraries(mujoco_node PRIVATE Boost::program_options)
+endif()
 
 if (ROS_VERSION EQUAL "2")
   target_link_libraries(${PROJECT_NAME}

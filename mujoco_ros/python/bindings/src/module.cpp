@@ -38,17 +38,15 @@
 
 #include <mujoco/mujoco.h>
 #include <mujoco_ros/render_backend.hpp>
+#include <mujoco_ros/rendering/render_backend_interface.hpp>
+#include <mujoco_ros/ros_version.hpp>
 
 namespace {
 
 #if RENDER_BACKEND == GLFW_BACKEND
-constexpr const char *kRenderBackend = "GLFW";
-#elif RENDER_BACKEND == OSMESA_BACKEND
-constexpr const char *kRenderBackend = "OSMesa";
-#elif RENDER_BACKEND == EGL_BACKEND
-constexpr const char *kRenderBackend = "EGL";
+constexpr const char *kViewerBackend = "GLFW";
 #else
-constexpr const char *kRenderBackend = "NONE";
+constexpr const char *kViewerBackend = "NONE";
 #endif
 
 } // namespace
@@ -58,7 +56,10 @@ namespace mujoco_ros::python {
 PYBIND11_MODULE(pymujoco_ros, module)
 {
 	module.attr("__mujoco_version__") = mj_versionString();
-	module.attr("__render_backend__") = kRenderBackend;
+	module.attr("__ros_version__")    = MJR_ROS_VERSION; // 1 or 2
+	module.attr("__render_backend__") = mujoco_ros::rendering::CompiledRenderBackendDisplayName(
+	    mujoco_ros::rendering::RenderBackendDisplayStyle::kPythonModule);
+	module.attr("__viewer_backend__") = kViewerBackend;
 
 	InitEnvStructs(module);
 	InitPlugins(module);

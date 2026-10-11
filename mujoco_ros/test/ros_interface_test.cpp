@@ -169,7 +169,7 @@ void compare_current_ros_time(double expected, const std::string &msg, MujocoEnv
 
 TEST_F(PendulumEnvFixture, Clock)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0., 1e-6) << "Simulation time should be 0.0!";
 	int total_steps = 0;
 
@@ -188,9 +188,25 @@ TEST_F(PendulumEnvFixture, Clock)
 	                         std::string("Simulation time should have increased by 10 steps!"), env_ptr.get());
 }
 
+TEST_F(BaseEnvFixture, RenderBackpressurePolicyStartupReader)
+{
+	nh->setParam("render_backpressure_policy", "wait_for_slot");
+	auto sync_env = std::make_unique<MujocoEnvTestWrapper>("", nh.get());
+	EXPECT_EQ(sync_env->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+	sync_env->shutdown();
+}
+
+TEST_F(PendulumEnvFixture, RenderBackpressurePolicyRuntimeValidation)
+{
+	ASSERT_TRUE(env_ptr->SetRenderBackpressurePolicy("wait_for_slot").ok());
+	const auto rejected = env_ptr->SetRenderBackpressurePolicy("invalid");
+	EXPECT_EQ(rejected.code, rendering::FrameStatusCode::kInvalidPolicy);
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+}
+
 TEST_F(PendulumEnvFixture, ShutdownCallback)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/shutdown"))
 	    << "Shutdown service should be available!";
@@ -211,7 +227,7 @@ TEST_F(PendulumEnvFixture, ShutdownCallback)
 
 TEST_F(PendulumEnvFixture, PauseCallback)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_pause"))
 	    << "Pause service should be available!";
@@ -222,26 +238,26 @@ TEST_F(PendulumEnvFixture, PauseCallback)
 	    << "unpause service call failed!";
 
 	float seconds = 0;
-	while (seconds < 2 && !env_ptr->settings_.run) { // wait for unpause
+	while (seconds < 2 && !env_ptr->GetControlSnapshot().running) { // wait for unpause
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
-	EXPECT_TRUE(env_ptr->settings_.run) << "Simulation should be running!";
+	EXPECT_TRUE(env_ptr->GetControlSnapshot().running) << "Simulation should be running!";
 
 	srv.request.paused = true;
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_pause", srv))
 	    << "pause service call failed!";
 	seconds = 0;
-	while (seconds < 2 && env_ptr->settings_.run) { // wait for pause
+	while (seconds < 2 && env_ptr->GetControlSnapshot().running) { // wait for pause
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		seconds += 0.001;
 	}
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 }
 
 TEST_F(PendulumEnvFixture, ReloadStringTooLong)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/reload"))
 	    << "Reload service should be available!";
@@ -255,7 +271,7 @@ TEST_F(PendulumEnvFixture, ReloadStringTooLong)
 
 TEST_F(PendulumEnvFixture, ReloadSameModelCallback)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/reload"))
 	    << "Reload service should be available!";
@@ -275,7 +291,7 @@ TEST_F(PendulumEnvFixture, ReloadSameModelCallback)
 
 TEST_F(PendulumEnvFixture, ReloadNewModelCallback)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/reload"))
 	    << "Reload service should be available!";
@@ -297,11 +313,11 @@ TEST_F(PendulumEnvFixture, ReloadNewModelCallback)
 
 TEST_F(PendulumEnvFixture, ResetCallback)
 {
-	env_ptr->settings_.run = 1;
+	ASSERT_TRUE(env_ptr->togglePaused(false));
 
 	env_ptr->step(100);
 
-	env_ptr->settings_.run = 0;
+	ASSERT_TRUE(env_ptr->togglePaused(true));
 
 	// Make sure reset service is available
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/reset"))
@@ -327,11 +343,11 @@ TEST_F(PendulumEnvFixture, StepGoalSingle)
 
 	const bool found = testing::has_topic(topics, env_ptr->GetHandleNamespace() + "/step/result");
 	// Workaround to connect to action server, this is only needed in cpp
-	env_ptr->settings_.run = 1;
+	ASSERT_TRUE(env_ptr->togglePaused(false));
 	EXPECT_TRUE(found) << "Step action should be available!";
 	ros::spinOnce();
 	actionlib::SimpleActionClient<mujoco_ros_msgs::StepAction> ac(env_ptr->GetHandleNamespace() + "/step", true);
-	env_ptr->settings_.run = 0;
+	ASSERT_TRUE(env_ptr->togglePaused(true));
 
 	// Wait for paused state to be applied
 	std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -341,7 +357,7 @@ TEST_F(PendulumEnvFixture, StepGoalSingle)
 	mujoco_ros_msgs::StepGoal goal;
 	goal.num_steps = 1;
 
-	EXPECT_EQ(env_ptr->settings_.env_steps_request, 0) << "No steps should be requested yet!";
+	EXPECT_EQ(env_ptr->GetControlSnapshot().pending_steps, 0) << "No steps should be requested yet!";
 	ac.sendGoal(goal);
 
 	EXPECT_TRUE(ac.waitForResult(ros::Duration(1.0))) << "Step action did not finish in time!";
@@ -370,7 +386,7 @@ TEST_F(PendulumEnvFixture, StepGoalMultiple)
 	const bool found = ac->wait_for_action_server(std::chrono::seconds(1));
 #endif
 	// Workaround to connect to action server, this is only needed in cpp
-	env_ptr->settings_.run = 1;
+	ASSERT_TRUE(env_ptr->togglePaused(false));
 	EXPECT_TRUE(found) << "Step action should be available!";
 
 #if MJR_ROS_VERSION == ROS_1
@@ -380,7 +396,7 @@ TEST_F(PendulumEnvFixture, StepGoalMultiple)
 #else // MJR_ROS_VERSION == ROS_2
 	mujoco_ros_msgs::action::Step::Goal goal;
 #endif
-	env_ptr->settings_.run = 0;
+	ASSERT_TRUE(env_ptr->togglePaused(true));
 
 	// Wait for paused state to be applied
 	std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -419,7 +435,7 @@ TEST_F(PendulumEnvFixture, StepGoalPreemptUnpaused)
 	const bool found = ac->wait_for_action_server(std::chrono::seconds(1));
 #endif
 	// Workaround to connect to action server, this is only needed in cpp
-	env_ptr->settings_.run = 1;
+	ASSERT_TRUE(env_ptr->togglePaused(false));
 	EXPECT_TRUE(found) << "Step action should be available!";
 #if MJR_ROS_VERSION == ROS_1
 	ros::spinOnce();
@@ -429,8 +445,7 @@ TEST_F(PendulumEnvFixture, StepGoalPreemptUnpaused)
 	ac.sendGoal(goal);
 
 	EXPECT_TRUE(ac.waitForResult(ros::Duration(1.0))) << "Step action did not finish in time!";
-	EXPECT_EQ(ac.getState(), actionlib::SimpleClientGoalState::PREEMPTED)
-	    << "Step action must be preempted when unpaused!";
+	EXPECT_EQ(ac.getState(), actionlib::SimpleClientGoalState::ABORTED) << "Step action must be aborted when unpaused!";
 	EXPECT_FALSE(ac.getResult()->success) << "Step action should have failed!";
 #else // MJR_ROS_VERSION == ROS_2
 	auto goal          = mujoco_ros_msgs::action::Step::Goal();
@@ -455,21 +470,19 @@ TEST_F(PendulumEnvFixture, StepGoalCancelPreempt)
 	                                                                         env_ptr->GetHandleNamespace() + "/step");
 	bool found = ac->wait_for_action_server(std::chrono::seconds(1));
 #endif
-	// Workaround to connect to action server, this is only needed in cpp
-	env_ptr->settings_.run = 1;
 	EXPECT_TRUE(found) << "Step action should be available!";
 
 #if MJR_ROS_VERSION == ROS_1
+	// Workaround to connect to action server, this is only needed in cpp
+	ASSERT_TRUE(env_ptr->togglePaused(false));
 	ros::spinOnce();
 	actionlib::SimpleActionClient<mujoco_ros_msgs::StepAction> ac(env_ptr->GetHandleNamespace() + "/step", true);
-#endif
 
-	env_ptr->settings_.run = 0;
+	ASSERT_TRUE(env_ptr->togglePaused(true));
 
 	// Wait for paused state to be applied
 	std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-#if MJR_ROS_VERSION == ROS_1
 	mujoco_ros_msgs::StepGoal goal;
 	goal.num_steps = 10000;
 	ac.sendGoal(goal);
@@ -478,6 +491,8 @@ TEST_F(PendulumEnvFixture, StepGoalCancelPreempt)
 	EXPECT_EQ(ac.getState(), actionlib::SimpleClientGoalState::PREEMPTED);
 	EXPECT_FALSE(ac.getResult()->success) << "Step action should have failed!";
 #else // MJR_ROS_VERSION == ROS_2
+	ASSERT_FALSE(env_ptr->GetControlSnapshot().running) << "Step cancel test requires a paused simulation!";
+
 	auto goal               = mujoco_ros_msgs::action::Step::Goal();
 	goal.num_steps          = 10000;
 	auto goal_handle_future = ac->async_send_goal(goal);
@@ -486,6 +501,16 @@ TEST_F(PendulumEnvFixture, StepGoalCancelPreempt)
 
 	auto goal_handle = goal_handle_future.get();
 	ASSERT_TRUE(goal_handle) << "Goal was not accepted!";
+	// Register for the result before canceling. Otherwise a fast terminal result can arrive as an
+	// "unknown goal response" and the later async_get_result sees a confused/ABORTED outcome.
+	auto result_future = ac->async_get_result(goal_handle);
+
+	float seconds = 0;
+	while (env_ptr->GetControlSnapshot().pending_steps == 0 && seconds < 1) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		seconds += 0.001;
+	}
+	ASSERT_LT(seconds, 1) << "Step action did not create a pending manual-step request!";
 
 	auto cancel_future = ac->async_cancel_goal(goal_handle);
 	ASSERT_NE(cancel_future.wait_for(std::chrono::seconds(1)), std::future_status::timeout)
@@ -495,7 +520,6 @@ TEST_F(PendulumEnvFixture, StepGoalCancelPreempt)
 	EXPECT_TRUE(cancel_response) << "Goal cancel was not accepted!";
 	EXPECT_FALSE(cancel_response->goals_canceling.empty()) << "No goals were canceled!";
 
-	auto result_future = ac->async_get_result(goal_handle);
 	EXPECT_NE(result_future.wait_for(std::chrono::seconds(1)), std::future_status::timeout)
 	    << "Step action did not finish in time!";
 	auto result = result_future.get();
@@ -515,7 +539,7 @@ TEST_F(PendulumEnvFixture, DefaultInitialJointStates)
 	EXPECT_EQ(pos_map.size(), 0) << "No initial joint positions should be set!";
 	EXPECT_EQ(vel_map.size(), 0) << "No initial joint velocities should be set!";
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should not be running yet!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should not be running yet!";
 	EXPECT_EQ(env_ptr->getPendingSteps(), -1) << "Simulation should have pending steps!";
 	EXPECT_NEAR(d->time, 0.0, 1e-6) << "Simulation time should be 0.0!";
 
@@ -671,7 +695,7 @@ TEST_F(PendulumEnvFixture, CustomInitialJointStatesOnReset)
 
 TEST_F(PendulumEnvFixture, SetBodyStateNotAllowed)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -802,7 +826,7 @@ TEST_F(PendulumEnvFixture, SetBodyStateTwistNotWorldFrame)
 
 TEST_F(PendulumEnvFixture, SetBodyStatePosAndTwist)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -845,7 +869,7 @@ TEST_F(PendulumEnvFixture, SetBodyStatePosAndTwist)
 
 TEST_F(PendulumEnvFixture, SetBodyStateMass)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -869,7 +893,7 @@ TEST_F(PendulumEnvFixture, SetBodyStateMass)
 
 TEST_F(PendulumEnvFixture, SetBodyStateResetQPos)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -893,7 +917,7 @@ TEST_F(PendulumEnvFixture, SetBodyStateResetQPos)
 
 TEST_F(PendulumEnvFixture, GetBodyStateNotAllowed)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_body_state"))
 	    << "Get body state service should be available!";
@@ -912,7 +936,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateNotAllowed)
 
 TEST_F(PendulumEnvFixture, GetBodyStateNameEmpty)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -927,7 +951,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateNameEmpty)
 
 TEST_F(PendulumEnvFixture, GetBodyStateInvalidName)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -944,7 +968,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateInvalidName)
 
 TEST_F(PendulumEnvFixture, GetBodyStateResolveBodyFromGeom)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_body_state"))
 	    << "Get body state service should be available!";
@@ -959,7 +983,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateResolveBodyFromGeom)
 
 TEST_F(PendulumEnvFixture, GetBodyStateStaticBody)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -990,7 +1014,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateStaticBody)
 
 TEST_F(PendulumEnvFixture, GetBodyStateMultijoint)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -1021,7 +1045,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateMultijoint)
 
 TEST_F(PendulumEnvFixture, GetBodyStateFreejoint)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_body_state"))
 	    << "Set body state service should be available!";
@@ -1069,7 +1093,7 @@ TEST_F(PendulumEnvFixture, GetBodyStateFreejoint)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesNameEmpty)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1085,7 +1109,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesNameEmpty)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesInvalidGeomName)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1103,7 +1127,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesInvalidGeomName)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesValidGeomName)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1121,7 +1145,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesValidGeomName)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesMass)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1148,7 +1172,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesMass)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesFriction)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1181,7 +1205,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesFriction)
 // set type (not checking PLANE, HFIELD, MESH, and rendering types)
 TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeBox)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1207,7 +1231,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeBox)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeCylinder)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1232,7 +1256,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeCylinder)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeEllipsoid)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1257,7 +1281,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeEllipsoid)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeCapsule)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1282,7 +1306,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeCapsule)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeSphere)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1307,7 +1331,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesTypeSphere)
 
 TEST_F(PendulumEnvFixture, SetGeomPropertiesSize)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1340,7 +1364,7 @@ TEST_F(PendulumEnvFixture, SetGeomPropertiesSize)
 
 TEST_F(PendulumEnvFixture, GetGeomPropertiesNotAllowed)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_geom_properties"))
@@ -1361,7 +1385,7 @@ TEST_F(PendulumEnvFixture, GetGeomPropertiesNotAllowed)
 
 TEST_F(PendulumEnvFixture, GetGeomPropertiesNameEmpty)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_geom_properties"))
@@ -1377,7 +1401,7 @@ TEST_F(PendulumEnvFixture, GetGeomPropertiesNameEmpty)
 
 TEST_F(PendulumEnvFixture, GetGeomPropertiesInvalidGeomName)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_geom_properties"))
@@ -1394,7 +1418,7 @@ TEST_F(PendulumEnvFixture, GetGeomPropertiesInvalidGeomName)
 
 TEST_F(PendulumEnvFixture, GetGeomPropertiesValidGeomName)
 {
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(env_ptr->getDataPtr()->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_geom_properties"))
@@ -1460,7 +1484,7 @@ TEST_F(EqualityEnvFixture, InitialEqualityConstraintValues)
 	EXPECT_EQ(m->eq_type[joint_eq_id], mjEQ_JOINT) << "joint_eq has incorrect type";
 	EXPECT_EQ(m->eq_type[tendon_eq_id], mjEQ_TENDON) << "weld_eq has incorrect type";
 	EXPECT_EQ(m->eq_type[connect_eq_id], mjEQ_CONNECT) << "connect_eq has incorrect type";
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 
 	// test joint constraint data
@@ -1893,7 +1917,7 @@ TEST_F(EqualityEnvFixture, GetEqConstraint)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(),
 	                                               env_ptr->GetHandleNamespace() + "/set_eq_constraint_parameters"))
@@ -1926,7 +1950,7 @@ TEST_F(PendulumEnvFixture, SetGravityNotAllowed)
 {
 	mjData *d = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_gravity"))
 	    << "Set gravity service should be available!";
@@ -1948,7 +1972,7 @@ TEST_F(PendulumEnvFixture, SetGravity)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_gravity"))
 	    << "Set gravity service should be available!";
@@ -1968,7 +1992,7 @@ TEST_F(PendulumEnvFixture, GetGravityNotAllowed)
 {
 	mjData *d = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_gravity"))
 	    << "Get gravity service should be available!";
@@ -1990,7 +2014,7 @@ TEST_F(PendulumEnvFixture, GetGravity)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/get_gravity"))
 	    << "Get gravity service should be available!";
@@ -2067,7 +2091,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointPositions_Valid)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2123,7 +2147,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointPositions_NoParams)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2156,7 +2180,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointPositions_InvalidJointName)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2203,7 +2227,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointPositions_InvalidDOFs)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2252,7 +2276,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointVels_Valid)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2308,7 +2332,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointVels_NoParams)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2341,7 +2365,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointVels_InvalidJointName)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2388,7 +2412,7 @@ TEST_F(PendulumEnvFixture, LoadInitialJointVels_InvalidDOFs)
 	mjModel *m = env_ptr->getModelPtr();
 	mjData *d  = env_ptr->getDataPtr();
 
-	EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 	EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 	EXPECT_TRUE(
 	    ::testing::service_exists_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/load_initial_joint_states"))
@@ -2438,7 +2462,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_NotAllowed)
 	env_ptr->setEvalMode(true);
 	env_ptr->setAdminHash("right_hash");
 
-	int initial_rt_index = env_ptr->settings_.real_time_index;
+	int initial_rt_index = env_ptr->GetControlSnapshot().real_time_index;
 
 	mujoco_ros_msgs::SetFloat srv;
 	srv.request.value      = 1.5; // Increase real-time factor
@@ -2451,7 +2475,8 @@ TEST_F(PendulumEnvFixture, SetRTFactor_NotAllowed)
 	    << "Set RT factor service call failed!";
 	EXPECT_FALSE(srv.response.success) << "Service call should not be successful!";
 
-	EXPECT_EQ(env_ptr->settings_.real_time_index, initial_rt_index) << "Real-time factor should not have changed!";
+	EXPECT_EQ(env_ptr->GetControlSnapshot().real_time_index, initial_rt_index)
+	    << "Real-time factor should not have changed!";
 }
 
 TEST_F(PendulumEnvFixture, SetRTFactor_Increase)
@@ -2465,7 +2490,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_Increase)
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
 
-	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->settings_.real_time_index], 150.f)
+	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->GetControlSnapshot().real_time_index], 150.f)
 	    << "Real-time factor should be set to 1.5!";
 }
 
@@ -2479,7 +2504,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_Decrease)
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_rt_factor", srv))
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
-	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->settings_.real_time_index], 50.f)
+	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->GetControlSnapshot().real_time_index], 50.f)
 	    << "Real-time factor should be set to 0.5!";
 }
 
@@ -2493,7 +2518,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_UnboundMode)
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_rt_factor", srv))
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
-	EXPECT_EQ(env_ptr->settings_.real_time_index, 0) << "Real-time factor should be set to unbound mode!";
+	EXPECT_EQ(env_ptr->GetControlSnapshot().real_time_index, 0) << "Real-time factor should be set to unbound mode!";
 }
 
 TEST_F(PendulumEnvFixture, SetRTFactor_OutOfBounds)
@@ -2504,7 +2529,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_OutOfBounds)
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_rt_factor", srv))
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
-	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->settings_.real_time_index], 2000.0f)
+	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->GetControlSnapshot().real_time_index], 2000.0f)
 	    << "Real-time factor should be clipped to the maximum boundary value!";
 }
 
@@ -2516,7 +2541,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_RoundUpClosest)
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_rt_factor", srv))
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
-	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->settings_.real_time_index], 50.0f)
+	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->GetControlSnapshot().real_time_index], 50.0f)
 	    << "Real-time factor should be clipped to the maximum boundary value!";
 }
 
@@ -2528,7 +2553,7 @@ TEST_F(PendulumEnvFixture, SetRTFactor_RoundDownClosest)
 	EXPECT_TRUE(::testing::service_call_for_test(env_ptr.get(), env_ptr->GetHandleNamespace() + "/set_rt_factor", srv))
 	    << "Set RT factor service call failed!";
 	EXPECT_TRUE(srv.response.success) << "Service call was not successful!";
-	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->settings_.real_time_index], 40.0f)
+	EXPECT_FLOAT_EQ(env_ptr->percentRealTime[env_ptr->GetControlSnapshot().real_time_index], 40.0f)
 	    << "Real-time factor should be clipped to the maximum boundary value!";
 }
 
@@ -2633,6 +2658,57 @@ TEST_F(PendulumEnvFixture, DynamicReconfigureServiceExists)
 	    << "Service should be available!";
 }
 
+#if MJR_ROS_VERSION == ROS_1
+TEST_F(BaseEnvFixture, DynamicReconfigureNoModelPreservesRenderBackpressurePolicy)
+{
+	auto sync_env = std::make_unique<MujocoEnvTestWrapper>("", nh.get());
+	dynamic_reconfigure::ReconfigureRequest req;
+	dynamic_reconfigure::ReconfigureResponse res;
+	dynamic_reconfigure::StrParameter policy;
+	policy.name  = "render_backpressure_policy";
+	policy.value = "wait_for_slot";
+	req.config.strs.emplace_back(policy);
+
+	ASSERT_TRUE(ros::service::call(sync_env->GetHandleNamespace() + "/set_parameters", req, res));
+	EXPECT_EQ(sync_env->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+	sync_env->shutdown();
+}
+
+TEST_F(PendulumEnvFixture, DynamicReconfigureRenderBackpressurePolicy)
+{
+	dynamic_reconfigure::ReconfigureRequest req;
+	dynamic_reconfigure::ReconfigureResponse res;
+	dynamic_reconfigure::StrParameter policy;
+	policy.name  = "render_backpressure_policy";
+	policy.value = "wait_for_slot";
+	req.config.strs.emplace_back(policy);
+
+	ASSERT_TRUE(ros::service::call(env_ptr->GetHandleNamespace() + "/set_parameters", req, res));
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+
+	policy.value = "invalid";
+	req.config.strs.clear();
+	req.config.strs.emplace_back(policy);
+	// Native ROS 1 dynamic_reconfigure catches callback exceptions and still
+	// reports a successful service transport response. The callback restores
+	// the current configuration before the server publishes it.
+	EXPECT_TRUE(ros::service::call(env_ptr->GetHandleNamespace() + "/set_parameters", req, res));
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+}
+#else
+TEST_F(PendulumEnvFixture, RuntimeParameterRenderBackpressurePolicy)
+{
+	auto result =
+	    env_ptr->set_parameters_atomically({ rclcpp::Parameter("render_backpressure_policy", "wait_for_slot") });
+	ASSERT_TRUE(result.successful) << result.reason;
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("render_backpressure_policy", "invalid") });
+	EXPECT_FALSE(result.successful);
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), rendering::RenderBackpressurePolicy::kWaitForSlot);
+}
+#endif
+
 TEST_F(PendulumEnvFixture, DynamicReconfigureSingleParam)
 {
 	// Test dynamic reconfigure
@@ -2649,6 +2725,34 @@ TEST_F(PendulumEnvFixture, DynamicReconfigureSingleParam)
 	EXPECT_TRUE(ros::service::call(env_ptr->GetHandleNamespace() + "/set_parameters", req, res))
 	    << "Service call should not fail!";
 	EXPECT_DOUBLE_EQ(env_ptr->getModelPtr()->opt.timestep, 0.002) << "Timestep should have been updated!";
+}
+
+TEST_F(PendulumEnvFixture, DynamicReconfigureInvalidValueRollsBackWithNativeSuccess)
+{
+	const auto before = env_ptr->GetRuntimeOptions();
+	ASSERT_TRUE(before.ok());
+
+	dynamic_reconfigure::ReconfigureRequest req;
+	dynamic_reconfigure::ReconfigureResponse res;
+	dynamic_reconfigure::DoubleParameter timestep;
+	dynamic_reconfigure::StrParameter solimp;
+	dynamic_reconfigure::Config conf;
+
+	timestep.name  = "timestep";
+	timestep.value = 0.002;
+	conf.doubles.emplace_back(timestep);
+	solimp.name  = "solimp";
+	solimp.value = "0.9 0.95";
+	conf.strs.emplace_back(solimp);
+	req.config = conf;
+
+	// Native ROS 1 dynamic_reconfigure catches callback exceptions and returns
+	// success. The callback restores the current runtime options first.
+	EXPECT_TRUE(ros::service::call(env_ptr->GetHandleNamespace() + "/set_parameters", req, res));
+	const auto after = env_ptr->GetRuntimeOptions();
+	ASSERT_TRUE(after.ok());
+	EXPECT_EQ(after.effective, before.effective);
+	EXPECT_EQ(after.epoch, before.epoch);
 }
 
 TEST_F(PendulumEnvFixture, DynamicReconfigureAllParams)
@@ -2845,7 +2949,7 @@ TEST_F(PendulumEnvFixture, DynamicReconfigureAllParams)
 	conf.doubles.emplace_back(double_param);
 
 	string_param.name  = "solimp";
-	string_param.value = "0.8 0.9 0.1";
+	string_param.value = "0.8 0.9 0.1 0.5 2";
 	conf.strs.emplace_back(string_param);
 
 	string_param.name  = "solref";
@@ -2853,7 +2957,7 @@ TEST_F(PendulumEnvFixture, DynamicReconfigureAllParams)
 	conf.strs.emplace_back(string_param);
 
 	string_param.name  = "friction";
-	string_param.value = "0.5 0.5 0.1 0.1";
+	string_param.value = "0.5 0.5 0.1 0.1 0.1";
 	conf.strs.emplace_back(string_param);
 
 	req.config = conf;
@@ -3014,7 +3118,7 @@ TEST_F(PendulumEnvFixture, RuntimeParametersExistAndSyncFromModel)
 	ASSERT_TRUE(env_ptr->has_parameter("override_contacts"));
 	ASSERT_TRUE(env_ptr->has_parameter("solimp"));
 
-	EXPECT_EQ(env_ptr->get_parameter("running").as_bool(), static_cast<bool>(env_ptr->settings_.run.load()));
+	EXPECT_EQ(env_ptr->get_parameter("running").as_bool(), env_ptr->GetControlSnapshot().running);
 	EXPECT_DOUBLE_EQ(env_ptr->get_parameter("timestep").as_double(), env_ptr->getModelPtr()->opt.timestep);
 	EXPECT_EQ(env_ptr->get_parameter("integrator").as_int(), env_ptr->getModelPtr()->opt.integrator);
 }
@@ -3142,16 +3246,16 @@ TEST_F(PendulumEnvFixture, RuntimeParameterAllParams)
 	    rclcpp::Parameter("multiccd", true),
 	    rclcpp::Parameter("island", true),
 	    rclcpp::Parameter("margin", 0.5),
-	    rclcpp::Parameter("solimp", std::string("0.8 0.9 0.1")),
+	    rclcpp::Parameter("solimp", std::string("0.8 0.9 0.1 0.5 2")),
 	    rclcpp::Parameter("solref", std::string("0.03 1.1")),
-	    rclcpp::Parameter("friction", std::string("0.5 0.5 0.1 0.1")),
+	    rclcpp::Parameter("friction", std::string("0.5 0.5 0.1 0.1 0.1")),
 	});
 
 	ASSERT_TRUE(result.successful) << result.reason;
 	std::lock_guard<std::recursive_mutex> lock(env_ptr->physics_thread_mutex_);
 
 	EXPECT_STREQ(env_ptr->settings_.admin_hash, std::string("new_hash").c_str());
-	EXPECT_FALSE(env_ptr->settings_.run.load());
+	EXPECT_FALSE(env_ptr->GetControlSnapshot().running);
 
 	EXPECT_EQ(env_ptr->getModelPtr()->opt.integrator, 2);
 	EXPECT_EQ(env_ptr->getModelPtr()->opt.cone, 0);
@@ -3227,5 +3331,59 @@ TEST_F(PendulumEnvFixture, RuntimeParameterRejectsInvalidValues)
 
 	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("timestep", std::string("not_a_double")) });
 	EXPECT_FALSE(result.successful);
+}
+
+TEST_F(PendulumEnvFixture, RuntimeParameterRejectsWrongTransportTypes)
+{
+	const auto before_policy     = env_ptr->GetRenderBackpressurePolicy();
+	const auto before_running    = env_ptr->GetControlSnapshot().running;
+	const auto before_iterations = env_ptr->getModelPtr()->opt.iterations;
+
+	auto result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("running", std::string("yes")) });
+	EXPECT_FALSE(result.successful);
+	EXPECT_EQ(env_ptr->GetControlSnapshot().running, before_running);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("render_backpressure_policy", true) });
+	EXPECT_FALSE(result.successful);
+	EXPECT_EQ(env_ptr->GetRenderBackpressurePolicy(), before_policy);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("admin_hash", 42) });
+	EXPECT_FALSE(result.successful);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("iterations", 1.5) });
+	EXPECT_FALSE(result.successful);
+	EXPECT_EQ(env_ptr->getModelPtr()->opt.iterations, before_iterations);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("tolerance", std::string("not-a-double")) });
+	EXPECT_FALSE(result.successful);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("gravity", true) });
+	EXPECT_FALSE(result.successful);
+
+	result = env_ptr->set_parameters_atomically({ rclcpp::Parameter("energy", 1) });
+	EXPECT_FALSE(result.successful);
+}
+
+TEST_F(PendulumEnvFixture, RuntimeParameterBatchRollsBackAllState)
+{
+	const auto before = env_ptr->GetRuntimeOptions();
+	ASSERT_TRUE(before.ok());
+	const bool running_before = env_ptr->GetControlSnapshot().running;
+	const std::string admin_before(env_ptr->settings_.admin_hash);
+
+	const auto result = env_ptr->set_parameters_atomically({
+	    rclcpp::Parameter("timestep", 0.003),
+	    rclcpp::Parameter("running", true),
+	    rclcpp::Parameter("admin_hash", std::string("must_not_apply")),
+	    rclcpp::Parameter("solimp", std::string("0.9 0.95")),
+	});
+
+	EXPECT_FALSE(result.successful);
+	const auto after = env_ptr->GetRuntimeOptions();
+	ASSERT_TRUE(after.ok());
+	EXPECT_EQ(after.effective, before.effective);
+	EXPECT_EQ(after.epoch, before.epoch);
+	EXPECT_EQ(env_ptr->GetControlSnapshot().running, running_before);
+	EXPECT_STREQ(env_ptr->settings_.admin_hash, admin_before.c_str());
 }
 #endif

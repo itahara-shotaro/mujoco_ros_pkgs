@@ -15,7 +15,8 @@
 /*********************************************************************
  * Software License Agreement (BSD 3-Clause License)
  *
- *  Copyright (c) 2022-2025, Bielefeld University
+ *  Copyright (c) 2022-2026, Bielefeld University
+ *  Copyright (c) 2026, Neura Robotics
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -28,7 +29,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Bielefeld University nor the names of its
+ *   * Neither the name of Bielefeld University nor Neura Robotics nor the names of their
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -54,10 +55,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <iterator>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <utility>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #if MJR_ROS_VERSION == ROS_1
@@ -91,6 +101,15 @@ using TransformStamped = geometry_msgs::msg::TransformStamped;
 
 #include <mujoco_ros/render_backend.hpp>
 #include <mujoco_ros/common_types.hpp>
+#include <mujoco_ros/detail/viewer_connection_state.hpp>
+#include <mujoco_ros/mesh_uri_prep.hpp>
+#include <mujoco_ros/simulation_control_state.hpp>
+#include <mujoco_ros/runtime_options.hpp>
+#include <mujoco_ros/plugin_host.hpp>
+#include <mujoco_ros/rendering/render_core.hpp>
+#include <mujoco_ros/rendering/render_snapshot.hpp>
+#include <mujoco_ros/offscreen_camera_config.hpp>
+#include <mujoco_ros/offscreen_transport.hpp>
 #include <mujoco_ros/viewer.hpp>
 
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -100,8 +119,6 @@ using TransformStamped = geometry_msgs::msg::TransformStamped;
 #if RENDER_BACKEND == GLFW_BACKEND
 #include <mujoco_ros/glfw_adapter.h>
 #include <mujoco_ros/glfw_dispatch.h>
-#elif RENDER_BACKEND == OSMESA_BACKEND
-#include <GL/osmesa.h>
 #endif
 
 namespace mujoco_ros {
@@ -123,38 +140,6 @@ struct CollisionFunctionDefault
 	mjfCollision collision_cb_;
 };
 
-struct OffscreenRenderContext
-{
-	mjvCamera cam;
-	std::unique_ptr<unsigned char[]> rgb;
-	std::unique_ptr<float[]> depth;
-#if RENDER_BACKEND == GLFW_BACKEND
-	std::shared_ptr<GLFWwindow> window;
-#elif RENDER_BACKEND == OSMESA_BACKEND
-	struct
-	{
-		OSMesaContext ctx;
-		unsigned char buffer[10000000]; // TODO: size necessary or resize later?
-		bool initialized = false;
-	} osmesa;
-#endif
-	mjrContext con         = {};
-	mjvScene scn           = {};
-	mjvScene callbacks_scn = {};
-
-	std::thread render_thread_handle;
-
-	// Condition variable to signal that the offscreen render thread should render a new frame
-	std::atomic_bool request_pending = { false };
-
-	std::mutex render_mutex;
-	std::condition_variable_any cond_render_request;
-
-	std::vector<rendering::OffscreenCameraPtr> cams;
-
-	~OffscreenRenderContext();
-};
-
 struct EnvSettings
 {
 	EnvSettings() = default;
@@ -162,17 +147,11 @@ struct EnvSettings
 	    : headless(other.headless)
 	    , render_offscreen(other.render_offscreen)
 	    , use_sim_time(other.use_sim_time)
-	    , real_time_index(other.real_time_index)
+	    , render_backpressure_policy(other.render_backpressure_policy)
 	    , busywait(other.busywait)
 	    , num_mj_threads(other.num_mj_threads)
 	    , eval_mode(other.eval_mode)
-	    , run(other.run.load())
-	    , exit_request(other.exit_request.load())
 	    , visual_init_request(other.visual_init_request.load())
-	    , load_request(other.load_request.load())
-	    , reset_request(other.reset_request.load())
-	    , speed_changed(other.speed_changed.load())
-	    , env_steps_request(other.env_steps_request.load())
 	    , settings_changed(other.settings_changed.load())
 	    , is_python_request(other.is_python_request.load())
 	{
@@ -184,55 +163,37 @@ struct EnvSettings
 		if (this == &other) {
 			return *this;
 		}
-		headless         = other.headless;
-		render_offscreen = other.render_offscreen;
-		use_sim_time     = other.use_sim_time;
-		real_time_index  = other.real_time_index;
-		busywait         = other.busywait;
-		num_mj_threads   = other.num_mj_threads;
-		eval_mode        = other.eval_mode;
+		headless                   = other.headless;
+		render_offscreen           = other.render_offscreen;
+		use_sim_time               = other.use_sim_time;
+		render_backpressure_policy = other.render_backpressure_policy;
+		busywait                   = other.busywait;
+		num_mj_threads             = other.num_mj_threads;
+		eval_mode                  = other.eval_mode;
 		std::copy(std::begin(other.admin_hash), std::end(other.admin_hash), std::begin(admin_hash));
-		run.store(other.run.load());
-		exit_request.store(other.exit_request.load());
 		visual_init_request.store(other.visual_init_request.load());
-		load_request.store(other.load_request.load());
-		reset_request.store(other.reset_request.load());
-		speed_changed.store(other.speed_changed.load());
-		env_steps_request.store(other.env_steps_request.load());
 		settings_changed.store(other.settings_changed.load());
 		is_python_request.store(other.is_python_request.load());
 		return *this;
 	}
 
 	// Render options
-	bool headless         = false;
-	bool render_offscreen = false;
-	bool use_sim_time     = true;
+	bool headless                                                  = false;
+	bool render_offscreen                                          = false;
+	bool use_sim_time                                              = true;
+	rendering::RenderBackpressurePolicy render_backpressure_policy = rendering::RenderBackpressurePolicy::kDrop;
 
-	// Sim speed
-	int real_time_index = 9;
-	int busywait        = 0;
-	int num_mj_threads  = 1;
+	// Sim speed configuration
+	int busywait       = 0;
+	int num_mj_threads = 1;
 
 	// Mode
 	bool eval_mode      = false;
 	char admin_hash[64] = "\0";
 
-	// Atomics for multithread access
-	std::atomic_int run                 = { 0 };
-	std::atomic_int exit_request        = { 0 };
+	// Internal loading and configuration markers. Lifecycle control lives in SimulationControlState.
 	std::atomic_int visual_init_request = { 0 };
-
-	// Load request
-	//  0: no request
-	//  1: replace model_ with mnew and data_ with dnew
-	//  2: load mnew and dnew from file
-	std::atomic_int load_request      = { 0 };
-	std::atomic_int reset_request     = { 0 };
-	std::atomic_int speed_changed     = { 0 };
-	std::atomic_int env_steps_request = { 0 };
-
-	std::atomic_int settings_changed = { 0 };
+	std::atomic_int settings_changed    = { 0 };
 
 	// Must be set to true before loading a new model from python
 	std::atomic_int is_python_request = { 0 };
@@ -260,22 +221,38 @@ struct SimInfo
 	float rt_setting      = 1.0f;
 };
 
-struct PluginStat
-{
-	std::string name;
-	std::string type;
-	double load_time               = 0.0;
-	double reset_time              = 0.0;
-	double ema_steptime_control    = 0.0;
-	double ema_steptime_passive    = 0.0;
-	double ema_steptime_render     = 0.0;
-	double ema_steptime_last_stage = 0.0;
-};
-
 struct RosAPISettings
 {
 	bool running = false;
 	std::string admin_hash;
+	rendering::RenderBackpressurePolicy render_backpressure_policy = rendering::RenderBackpressurePolicy::kDrop;
+};
+
+class ConnectedViewersLease
+{
+public:
+	ConnectedViewersLease() = default;
+	ConnectedViewersLease(ConnectedViewersLease &&other) noexcept { *this = std::move(other); }
+	ConnectedViewersLease &operator=(ConnectedViewersLease &&other) noexcept;
+	~ConnectedViewersLease();
+
+	ConnectedViewersLease(const ConnectedViewersLease &)            = delete;
+	ConnectedViewersLease &operator=(const ConnectedViewersLease &) = delete;
+
+	const std::vector<Viewer *> &viewers() const { return viewers_; }
+	const std::vector<std::shared_ptr<ViewerConnectionState>> &connections() const { return connections_; }
+	bool empty() const { return viewers_.empty(); }
+
+private:
+	friend class MujocoEnv;
+	ConnectedViewersLease(std::vector<std::shared_ptr<ViewerConnectionState>> connections,
+	                      std::vector<ViewerOperationLease> operation_leases, std::vector<Viewer *> viewers);
+
+	void Release();
+
+	std::vector<std::shared_ptr<ViewerConnectionState>> connections_;
+	std::vector<ViewerOperationLease> operation_leases_;
+	std::vector<Viewer *> viewers_;
 };
 
 #if MJR_ROS_VERSION == ROS_1
@@ -286,7 +263,8 @@ public:
 	 * @brief Construct a new Mujoco Env object.
 	 *
 	 */
-	MujocoEnv(const std::string &admin_hash = std::string(), bool python_reload_service = false);
+	MujocoEnv(const std::string &admin_hash = std::string(), bool python_reload_service = false,
+	          bool create_gui_adapter = true);
 #else // MJR_ROS_VERSION == ROS_2
 class MujocoEnv : public rclcpp::Node
 {
@@ -296,7 +274,7 @@ public:
 	 *
 	 */
 	MujocoEnv(rclcpp::Executor::SharedPtr executor, const std::string &admin_hash = std::string(),
-	          bool auto_configure = true, bool python_reload_service = false);
+	          bool auto_configure = true, bool python_reload_service = false, bool create_gui_adapter = true);
 
 	/**
 	 * @brief Add a node to the executor of this server instance.
@@ -324,9 +302,49 @@ public:
 	bool UsesPythonReloadService() const { return python_reload_service_; }
 	// Friend declaration of RosAPI for access to private members
 	friend class RosAPI;
+	friend class Viewer;
+	friend class ConnectedViewersLease;
+	friend class OffscreenCameraConfig;
 
 public:
 	virtual ~MujocoEnv();
+
+	enum class ReloadPhase
+	{
+		// kRenderQuiescenceStarted is emitted after submission admission closes while
+		// physics_thread_mutex_ is held; observers must return without waiting for
+		// physics or graphics. An exception aborts reload and enters cleanup.
+		kRenderQuiescenceStarted,
+		// Emitted after RenderCore and all accepted caller-side render turns are idle,
+		// with no physics lock held. Observers must not wait for physics or graphics;
+		// an exception aborts reload and enters cleanup.
+		kRenderTurnsIdle,
+		// Emitted before render resources are initialized/reconfigured, while reload admission remains closed.
+		// No physics lock is held; observers must not wait for physics or graphics.
+		// An exception aborts reload and enters cleanup.
+		kRenderReconfigureStarted,
+		// The old camera/frame association has been retired; emitted under physics_thread_mutex_.
+		// Observers must return without waiting for physics or graphics. An exception
+		// aborts reload and enters cleanup.
+		kOldGenerationQuiesced,
+		// Model/data ownership has changed; emitted under physics_thread_mutex_.
+		// Observers must return without waiting for physics or graphics. An exception
+		// aborts reload and enters cleanup.
+		kModelSwapped,
+		// The new model/data has completed its forward pass; emitted under physics_thread_mutex_.
+		// Observers must return without waiting for physics or graphics. An exception
+		// aborts reload and enters cleanup.
+		kForwarded,
+		// New render resources are coherent and connected viewers are loaded; the
+		// final operational publication and this callback are emitted together under
+		// physics_thread_mutex_ after render admission reopens. Observers must return
+		// without waiting for physics or graphics. An exception aborts reload and
+		// enters cleanup.
+		kNewGenerationLoaded,
+		// Emitted after reload failure cleanup has restored explicit no-model lifecycle state, outside
+		// physics_thread_mutex_; an observer exception is captured and logged.
+		kReloadFailed,
+	};
 
 	MujocoEnv(const MujocoEnv &) = delete;
 
@@ -345,17 +363,22 @@ public:
 	mjvScene scn_;
 	mjvPerturb pert_;
 
-	MujocoEnvMutex physics_thread_mutex_;
+	mutable MujocoEnvMutex physics_thread_mutex_;
 
-	void ConnectViewer(Viewer *viewer);
-	void DisconnectViewer(Viewer *viewer);
+	std::shared_ptr<ViewerConnectionState> CreateViewerConnection(Viewer *viewer);
+	void UnregisterViewerConnection(const std::shared_ptr<ViewerConnectionState> &connection);
+	void RemoveViewerConnection(const std::shared_ptr<ViewerConnectionState> &connection,
+	                            std::thread::id except_render_owner = std::thread::id{});
+	void ConnectViewer(Viewer *viewer, const std::shared_ptr<ViewerConnectionState> &connection);
+	void DisconnectViewer(const std::shared_ptr<ViewerConnectionState> &connection);
+	ConnectedViewersLease AcquireConnectedViewersLease() const;
+	bool HasConnectedViewers() const;
+	bool IsHeadless() const;
 
 	char queued_filename_[kMaxFilenameLength] = "\0";
 
 	EnvSettings settings_;
 	SimState sim_state_;
-
-	std::vector<MujocoPluginPtr> const &GetPlugins() const { return plugins_; }
 
 	/**
 	 * @brief Register a custom collision function for collisions between two geom types.
@@ -383,9 +406,72 @@ public:
 	void Shutdown();
 	void Reset();
 	bool LoadModelFromString(const std::string &model_xml, char *load_error = nullptr, const int error_sz = 0);
+	void Configure();
+	rendering::FrameStatus GetRenderStatus() const;
+	rendering::FrameStatus SetRenderBackpressurePolicy(rendering::RenderBackpressurePolicy policy);
+	rendering::FrameStatus SetRenderBackpressurePolicy(const std::string &policy);
+	rendering::RenderBackpressurePolicy GetRenderBackpressurePolicy() const;
+	std::shared_ptr<rendering::RenderCore> ActiveRenderCore() const { return render_core_; }
+	OffscreenCameraConfig OpenOffscreenCamera(const std::string &camera_name);
+	FrameGeneration PublishedFrameGeneration() const { return frame_generation_; }
+	FrameGeneration ActiveFrameGeneration() const;
+	RuntimeOptionsTransactionResult GetRuntimeOptions();
+	RuntimeOptionsTransactionResult ApplyRuntimeOptions(const std::vector<RuntimeOptionInput> &input);
+	void SetPendingRuntimeOptions(const std::vector<RuntimeOptionInput> &input);
+
+	template <typename Func>
+	decltype(auto) WithPluginAccess(Func &&func) const
+	{
+		RecursiveLock physics_lock(physics_thread_mutex_);
+		if (!plugin_host_) {
+			throw std::runtime_error("Plugin Host is not initialized");
+		}
+		auto access = plugin_host_->AcquireScopedAccess();
+		return std::invoke(std::forward<Func>(func), access);
+	}
+
+	template <typename Func>
+	decltype(auto) WithPluginAccess(PluginGeneration expected_generation, Func &&func) const
+	{
+		RecursiveLock physics_lock(physics_thread_mutex_);
+		if (!plugin_host_) {
+			throw std::runtime_error("Plugin Host is not initialized");
+		}
+		auto access = plugin_host_->AcquireScopedAccess(expected_generation);
+		return std::invoke(std::forward<Func>(func), access);
+	}
+
+	template <typename Func>
+	decltype(auto) WithPluginAccess(ModelGeneration expected_model_generation, PluginGeneration expected_generation,
+	                                Func &&func) const
+	{
+		RecursiveLock physics_lock(physics_thread_mutex_);
+		if (!plugin_host_) {
+			throw std::runtime_error("Plugin Host is not initialized");
+		}
+		auto access = plugin_host_->AcquireScopedAccess(expected_model_generation, expected_generation);
+		return std::invoke(std::forward<Func>(func), access);
+	}
+
+	std::vector<PluginHandle> GetPluginHandles() const;
+
+	// Builds a MujocoEnv directly from URDF/SRDF (Extended Params come from SRDF
+	// <extended_params>, not a separate parameter), bypassing the
+	// ROS-param-driven FetchRosConfiguration path entirely -- useful for tests
+	// and non-ROS embedding. Routes through the existing LoadModelFromString
+	// .mjb-file path; adds no new protected load method. Throws std::runtime_error
+	// if conversion or compilation fails.
+	static std::unique_ptr<MujocoEnv> from_description(const std::string &urdf_path, const std::string &srdf_path,
+	                                                   const MeshPrepOptions &mesh_options = {},
+	                                                   bool generate_actuators             = false,
+	                                                   const std::string &attach_prefix    = "");
 	bool SetBodyState(const std::string &body_name, mjtNum *pose, mjtNum *twist, mjtNum &mass, bool set_pose,
 	                  bool set_twist, bool set_mass, bool reset_qpos, const std::string &admin_hash = std::string(),
 	                  char *status_message = nullptr, const int status_sz = 0);
+	bool SetBodyInertialProperties(const std::string &body_name, mjtNum mass, const mjtNum *ipos,
+	                               const mjtNum *principal_inertia, const mjtNum *iquat,
+	                               const std::string &admin_hash = std::string(), char *status_message = nullptr,
+	                               int status_sz = 0);
 	bool GetBodyState(std::string &body_name, mjtNum *pose, mjtNum *twist, mjtNum *mass,
 	                  const std::string &admin_hash = std::string(), char *status_message = nullptr,
 	                  const int status_sz = 0);
@@ -421,7 +507,7 @@ public:
 	SimInfo GetSimInfo();
 	bool SetRealTimeFactor(const float &rt_factor, const std::string &admin_hash = std::string(),
 	                       char *status_message = nullptr, const int status_sz = 0);
-	std::vector<PluginStat> GetPluginStats();
+	std::vector<PluginStat> GetPluginStats() const;
 	int GetPluginStats(std::vector<std::string> &plugin_names, std::vector<std::string> &types,
 	                   std::vector<double> &load_times, std::vector<double> &reset_times,
 	                   std::vector<double> &ema_steptimes_control, std::vector<double> &ema_steptimes_passive,
@@ -430,12 +516,13 @@ public:
 	/**
 	 * @brief Get information about the current simulation state.
 	 *
-	 * Additionally to the `settings_.load_request` state, this function also considers visual initialization to be a
-	 * part of the loading process.
+	 * In addition to the control-state load request, this function considers visual initialization to be part of
+	 * the loading process.
 	 *
 	 * @return 0 if done loading, 1 if loading is in progress, 2 if loading has been requested.
 	 */
 	int GetOperationalStatus();
+	bool WaitForOperationalStatusIdle(std::chrono::milliseconds timeout);
 
 	static constexpr float percentRealTime[] = {
 		-1, // unbound
@@ -444,29 +531,38 @@ public:
 	};
 
 	static MujocoEnv *instance;
-	static void ProxyControlCB(const mjModel * /*m*/, mjData * /*d*/)
+	static void ProxyControlCB(const mjModel *m, mjData *d)
 	{
 		if (MujocoEnv::instance != nullptr)
-			MujocoEnv::instance->RunControlCbs();
+			MujocoEnv::instance->RunControlCbs(m, d);
 	}
-	static void ProxyPassiveCB(const mjModel * /*m*/, mjData * /*d*/)
+	static void ProxyPassiveCB(const mjModel *m, mjData *d)
 	{
 		if (MujocoEnv::instance != nullptr)
-			MujocoEnv::instance->RunPassiveCbs();
+			MujocoEnv::instance->RunPassiveCbs(m, d);
 	}
 
 	// Proxies to MuJoCo callbacks
-	void RunControlCbs();
-	void RunPassiveCbs();
+	void RunControlCbs(const mjModel *, mjData *);
+	void RunPassiveCbs(const mjModel *, mjData *);
 
 	bool TogglePaused(bool paused, const std::string &admin_hash = std::string());
+	SimulationControlSnapshot GetControlSnapshot() const;
+	struct ManualStepRequest
+	{
+		bool accepted         = false;
+		ManualStepToken token = 0;
+	};
+	bool RequestManualSteps(int num_steps);
+	ManualStepRequest RequestManualStepsWithToken(int num_steps);
+	ManualStepSnapshot GetManualStepSnapshot(ManualStepToken token) const;
+	ManualStepSnapshot WaitForManualStepUpdate(ManualStepToken token, int observed_pending_steps) const;
+	bool CancelManualSteps(ManualStepToken token = 0);
+	void AcknowledgeManualStep(ManualStepToken token);
+	void RequestReset();
 
 #if RENDER_BACKEND == GLFW_BACKEND
 	GlfwAdapter *gui_adapter_ = nullptr;
-#endif
-
-#if RENDER_BACKEND == EGL_BACKEND || RENDER_BACKEND == OSMESA_BACKEND
-	bool InitGL();
 #endif
 
 	void RunRenderCbs(mjvScene *scene);
@@ -482,8 +578,38 @@ public:
 	void GetInitialJointVelocities(std::map<std::string, std::vector<double>> &joint_vel_map);
 
 protected:
-	std::vector<MujocoPlugin *> cb_ready_plugins_; // objects managed by plugins_
-	std::vector<MujocoPluginPtr> plugins_;
+	virtual void OnReloadPhase(ReloadPhase) {}
+
+	void SetPhysicsPreLockTestHook(std::function<void()> hook)
+	{
+		std::lock_guard<std::mutex> lock(physics_test_hook_mutex_);
+		physics_pre_lock_test_hook_ = std::move(hook);
+	}
+	bool IsResetInProgressForTest() const { return reset_in_progress_.load(std::memory_order_acquire); }
+
+	void SetResetRejectedTestHook(std::function<void()> hook)
+	{
+		std::lock_guard<std::mutex> lock(physics_test_hook_mutex_);
+		reset_rejected_test_hook_ = std::move(hook);
+	}
+	void SetRetirementTestHook(std::function<void()> hook)
+	{
+		std::lock_guard<std::mutex> lock(physics_test_hook_mutex_);
+		retirement_test_hook_ = std::move(hook);
+	}
+	std::size_t RenderCallbackSceneCountForTest() const
+	{
+		return render_callback_scene_count_.load(std::memory_order_relaxed);
+	}
+	void ResetBatchSnapshotAssemblyCountForTest() { batch_snapshot_assembly_count_.store(0, std::memory_order_relaxed); }
+	std::size_t BatchSnapshotAssemblyCountForTest() const
+	{
+		return batch_snapshot_assembly_count_.load(std::memory_order_relaxed);
+	}
+
+	std::unique_ptr<IPluginAdapterFactory> plugin_factory_;
+	std::unique_ptr<PluginHost> plugin_host_;
+	std::shared_ptr<void> plugin_lifetime_ = std::make_shared<int>(0);
 #if MJR_ROS_VERSION == ROS_1
 	XmlRpc::XmlRpcValue rpc_plugin_config_;
 #endif
@@ -531,7 +657,11 @@ protected:
 	/// Pointer to mjData
 	mjDataPtr data_; // technically could be a unique_ptr, but setting the deleter correctly is not trivial
 
-	std::vector<Viewer *> connected_viewers_;
+	std::vector<std::shared_ptr<ViewerConnectionState>> viewer_connections_;
+	mutable std::mutex viewer_connections_mutex_;
+	bool viewer_connections_closing_ = false;
+
+	void CloseViewerConnections();
 
 	void PublishSimTime(mjtNum time);
 #if MJR_ROS_VERSION == ROS_1
@@ -542,14 +672,50 @@ protected:
 	// ros api implementation
 	std::unique_ptr<RosAPI> ros_api_;
 	bool python_reload_service_ = false;
-
-	void Configure();
+	bool create_gui_adapter_    = true;
 
 	void RunLastStageCbs();
 
 	void NotifyGeomChanged(const int geom_id);
 	bool VerifyAdminHash(const std::string &hash);
-	void ResetSim();
+	mjtNum ResetSim();
+	void ProcessReset();
+	void ResetOffscreenCameras();
+	class InFlightRenderTurn
+	{
+	public:
+		InFlightRenderTurn(const InFlightRenderTurn &)            = delete;
+		InFlightRenderTurn &operator=(const InFlightRenderTurn &) = delete;
+		InFlightRenderTurn(InFlightRenderTurn &&other) noexcept : owner_(other.owner_) { other.owner_ = nullptr; }
+		InFlightRenderTurn &operator=(InFlightRenderTurn &&other) noexcept
+		{
+			if (this != &other) {
+				Release();
+				owner_       = other.owner_;
+				other.owner_ = nullptr;
+			}
+			return *this;
+		}
+		~InFlightRenderTurn();
+
+	private:
+		friend class MujocoEnv;
+		explicit InFlightRenderTurn(MujocoEnv *owner) : owner_(owner) {}
+		void Release();
+		MujocoEnv *owner_;
+	};
+	std::optional<InFlightRenderTurn> BeginInFlightRenderTurn();
+	void EndInFlightRenderTurn();
+	void CloseRenderTurnAdmission();
+	void OpenRenderTurnAdmission();
+	void WaitForInFlightRenderTurns();
+	bool RetireRenderResources(std::string *cleanup_errors = nullptr) noexcept;
+	// Clear camera RenderCore aliases and unregister env-level consumers.
+	// When clear_cameras is true, also drops the camera list (full teardown).
+	void DrainRenderConsumersForTeardown(bool clear_cameras) noexcept;
+	// Drain consumers, cancel in-flight turns, join and reset RenderCore.
+	void QuiesceRenderCoreForTeardown() noexcept;
+	void HandleReloadFailure(const char *message) noexcept;
 
 	/**
 	 * @brief Loads and sets the initial joint states from the parameter server.
@@ -573,6 +739,18 @@ protected:
 	std::atomic_int is_physics_running_   = { 0 };
 	std::atomic_int is_event_running_     = { 0 };
 	std::atomic_int is_rendering_running_ = { 0 };
+	std::atomic_bool reset_in_progress_   = { false };
+	std::atomic_bool reload_in_progress_{ false };
+	std::atomic<std::size_t> render_callback_scene_count_{ 0 };
+	std::atomic<std::size_t> batch_snapshot_assembly_count_{ 0 };
+	mutable std::mutex physics_test_hook_mutex_;
+	std::function<void()> physics_pre_lock_test_hook_;
+	std::function<void()> reset_rejected_test_hook_;
+	std::function<void()> retirement_test_hook_;
+	std::mutex render_turn_mutex_;
+	std::condition_variable render_turn_idle_;
+	bool render_turn_admission_open_         = true;
+	std::size_t in_flight_render_turn_count_ = 0;
 
 	/**
 	 * @brief Runs physics steps.
@@ -588,6 +766,63 @@ protected:
 	 * @brief physics step when sim is paused.
 	 */
 	void SimPausedPhysics(mjtNum &syncSim);
+	void SetPaused(bool paused);
+	void RequestReload();
+	void RequestModelLoad(const std::string &filename);
+	void RequestViewerReset();
+	void RequestViewerShutdown();
+	void SetRealTimeIndex(int real_time_index);
+	void SetViewerRealTimeIndex(int real_time_index);
+	bool HasManualStepRequest() const;
+	void RecordCompletedManualStep();
+	bool IsShutdownRequested() const;
+	void RequestShutdown();
+	void RequestLoad(int load_request);
+	void ClearResetRequest();
+	void MarkSpeedChanged();
+	bool ConsumeSpeedChange();
+	struct ControlSpeedSnapshot
+	{
+		int real_time_index = 0;
+		bool speed_changed  = false;
+	};
+	ControlSpeedSnapshot ConsumeSpeedSettingsSnapshot();
+	void ApplyPauseState(bool paused, bool notify_settings_changed = true);
+	template <typename Func>
+	void PublishLoadRequest(int load_request, Func &&publish_payload)
+	{
+		// EventLoop consumes both payload and request while holding this boundary. Keep the same
+		// physics -> control lock order here so it cannot observe a partially published load.
+		RecursiveLock physics_lock(physics_thread_mutex_);
+		WithControlState([this, load_request, &publish_payload]() {
+			publish_payload();
+			control_state_.SetLoadRequest(load_request);
+			if (load_request > 0) {
+				startup_runtime_options_open_ = false;
+				runtime_options_admission_epoch_.fetch_add(1);
+			}
+		});
+	}
+
+	void QueueModelFilenameForLoad(const std::string &filename, int load_request);
+	void QueueModelAndDataForLoad(mjModel *model, mjData *data, const std::string &filename, bool python_owned);
+
+	/**
+	 * @brief Serialize control-state transitions and load-payload publication.
+	 *
+	 * SimulationControlState is the only lifecycle/control authority. EnvSettings contains configuration
+	 * and internal loading markers only.
+	 */
+	template <typename Func>
+	auto WithControlState(Func &&func)
+	{
+		std::lock_guard<std::mutex> lock(control_state_boundary_mutex_);
+		if constexpr (std::is_void_v<std::invoke_result_t<Func &>>) {
+			func();
+		} else {
+			return func();
+		}
+	}
 
 	/**
 	 * @brief Handles requests from other threads (viewers).
@@ -600,13 +835,45 @@ protected:
 	 * @brief Tries to load all configured plugins.
 	 * This function is called when a new mjData object is assigned to the environment.
 	 */
-	void LoadPlugins();
+	void LoadPlugins(PluginGeneration generation);
 
-	void InitializeRenderResources();
+	std::vector<rendering::OffscreenCameraPtr> InitializeRenderResources();
+	struct RenderSnapshotBatch
+	{
+		std::vector<rendering::OffscreenCameraPtr> cameras;
+		std::shared_ptr<const mjModel> model;
+		std::shared_ptr<mjData> data;
+		std::shared_ptr<const std::vector<mjvGeom>> plugin_geometry;
+		std::vector<rendering::RenderPlan> plans;
+		std::vector<std::uint64_t> accepted_publication_sequences;
+		ModelGeneration model_generation;
+		std::chrono::nanoseconds simulation_time{ 0 };
+	};
+	void SubmitRenderSnapshot(RenderSnapshotBatch batch);
+	void ReconfigureRenderCore();
 
-	OffscreenRenderContext offscreen_;
-
-	void OffscreenRenderLoop();
+	CameraPublicationTransport camera_publication_transport_;
+	rendering::SnapshotPool snapshot_pool_;
+	std::shared_ptr<rendering::RenderCore> render_core_;
+	rendering::ConsumerId render_consumer_;
+	std::shared_ptr<const mjModel> render_model_copy_;
+	mutable std::mutex render_policy_mutex_;
+	std::mutex render_warning_mutex_;
+	std::chrono::steady_clock::time_point last_frame_slot_warning_{};
+	void WarnFrameSlotDrop(const rendering::FrameStatus &status);
+	// Keep storage unconditional: downstream consumers may compile without
+	// MJR_BUILD_TESTING, and public object layout must remain identical.
+	std::atomic<std::size_t> frame_slot_warning_count_{ 0 };
+	std::function<std::chrono::steady_clock::time_point()> warning_clock_for_testing_;
+	std::string last_frame_slot_warning_message_;
+#ifdef MJR_BUILD_TESTING
+	std::size_t FrameSlotWarningCountForTesting() const { return frame_slot_warning_count_.load(); }
+	void SetWarningClockForTesting(std::function<std::chrono::steady_clock::time_point()> clock)
+	{
+		warning_clock_for_testing_ = std::move(clock);
+	}
+	const std::string &LastFrameSlotWarningForTesting() const { return last_frame_slot_warning_message_; }
+#endif
 
 	// Model loading
 	mjModel *mnew = nullptr;
@@ -623,6 +890,39 @@ protected:
 	void LoadWithModelAndData();
 
 	mjThreadPool *threadpool_ = nullptr;
+
+	std::mutex control_state_boundary_mutex_;
+	SimulationControlState control_state_;
+	RuntimeOptionsPatch pending_runtime_options_;
+	bool has_pending_runtime_options_  = false;
+	bool startup_runtime_options_open_ = true;
+	std::atomic<std::uint64_t> runtime_options_admission_epoch_{ 0 };
+	OptionsEpoch options_epoch_;
+	ModelGeneration model_generation_;
+	PluginGeneration plugin_generation_;
+	FrameGeneration frame_generation_;
 };
 
 } // end namespace mujoco_ros
+
+namespace mujoco_ros {
+
+template <typename Func>
+decltype(auto) PluginHandle::WithAccess(Func &&func) const
+{
+	if (env_ == nullptr || lifetime_.expired()) {
+		throw std::runtime_error("plugin handle belongs to a destroyed MujocoEnv");
+	}
+	return env_->WithPluginAccess(model_generation_, generation_, std::forward<Func>(func));
+}
+
+template <typename Backend, typename Func>
+decltype(auto) PluginHandle::WithBackend(Func &&func) const
+{
+	return WithAccess([this, &func](const ScopedPluginAccess &access) -> decltype(auto) {
+		auto *backend = access.BackendObject<Backend>(name_, type_);
+		return std::invoke(std::forward<Func>(func), *backend);
+	});
+}
+
+} // namespace mujoco_ros

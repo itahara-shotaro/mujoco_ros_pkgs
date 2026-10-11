@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
-project(mujoco_ros_testing_utils VERSION 1.0.0 LANGUAGES CXX)
+project(mujoco_ros_testing_utils VERSION 2.0.0 LANGUAGES CXX)
 
 if(DEFINED ENV{ROS_VERSION})
   set(ROS_VERSION $ENV{ROS_VERSION})
@@ -31,6 +31,7 @@ if(ROS_VERSION EQUAL 1)
     assets/empty_world.xml
     assets/equality_world.xml
     assets/camera_world.xml
+    assets/four_camera_world.xml
     assets/pendulum_world.xml
     DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/assets
   )
@@ -55,6 +56,7 @@ elseif(ROS_VERSION EQUAL 2)
     assets/empty_world.xml
     assets/equality_world.xml
     assets/camera_world.xml
+    assets/four_camera_world.xml
     assets/pendulum_world.xml
     DESTINATION share/${PROJECT_NAME}/assets
   )

@@ -1,7 +1,12 @@
 ``hybrid-devel``
 ================
 
-``hybrid-devel`` is the active 1.0.0 release line. It supports ROS 1 and ROS 2 from a shared MuJoCo core and replaces the older split ROS 1 / ROS 2 package layout.
+``hybrid-devel`` is the integration line for the hybrid ROS 1 / ROS 2 packages
+(2.x). Feature work and direct maintainer fixes land here first.
+Stable releases and ``vX.Y.Z`` tags live on :doc:`hybrid_main`.
+
+It supports ROS 1 and ROS 2 from a shared MuJoCo core and replaces the older
+split ROS 1 / ROS 2 package layout.
 
 Single Source of Truth
 ----------------------
@@ -18,7 +23,15 @@ The ROS 1 side of ``hybrid-devel`` preserves the user-facing feature set from ``
 Architecture
 ------------
 
-The branch generates a ROS-version header from ``ROS_VERSION`` and uses it to select ROS 1 or ROS 2 code paths at compile time. Public headers are renamed to ``.hpp`` and include ROS-specific APIs through:
+The branch generates a ROS-version header from ``ROS_VERSION`` and uses it to select ROS 1 or ROS 2 code paths at compile time.
+
+.. figure:: images/hybrid-architecture.svg
+   :alt: One shared core implementation compiles against exactly one of two adapter layers, selected by the ROS_VERSION header at compile time -- ros_one adapters feeding the ROS 1 ecosystem, or ros_two adapters feeding the ROS 2 ecosystem.
+   :width: 85%
+
+   Any given build contains exactly one adapter layer, not both -- the branch happens at compile time, not at runtime.
+
+Public headers are renamed to ``.hpp`` and include ROS-specific APIs through:
 
 * ``mujoco_ros/ros_one/ros_api.hpp``
 * ``mujoco_ros/ros_two/ros_api.hpp``
@@ -27,9 +40,11 @@ The branch generates a ROS-version header from ``ROS_VERSION`` and uses it to se
 
 Source files are split similarly:
 
-* shared files such as ``mujoco_env.cpp``, ``physics.cpp``, ``loading.cpp``,   ``interface.cpp``, ``offscreen_camera.cpp``, and ``viewer.cpp``
+* shared core: ``mujoco_env``, ``physics``, ``loading``, ``interface``, ``plugin_host``, ``runtime_options``, ``rendering/*`` (RenderCore), ``offscreen_*``, and ``viewer``
 * ROS 1 adapters under ``src/ros_one``
 * ROS 2 adapters under ``src/ros_two``
+
+Module ownership inside that shared core is documented under :doc:`../architecture/overview/overview`.
 
 Launch Differences
 ------------------

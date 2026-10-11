@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
-project(mujoco_ros_control VERSION 1.0.0 LANGUAGES CXX)
+project(mujoco_ros_control VERSION 2.0.0 LANGUAGES CXX)
 
 if(DEFINED ENV{ROS_VERSION})
   set(ROS_VERSION $ENV{ROS_VERSION})
@@ -18,6 +18,8 @@ endif()
 
 set(CMAKE_CXX_FLAGS_SANITIZE "-fsanitize=address -g -O1 -fno-inline -fno-omit-frame-pointer -fno-optimize-sibling-calls")
 
+option(BUILD_PYTHON_BINDINGS "Build the pybind11 Python bindings" OFF)
+
 if(ROS_VERSION EQUAL 1)
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
 
@@ -29,13 +31,21 @@ if(ROS_VERSION EQUAL 1)
     hardware_interface
     joint_limits_interface
     mujoco_ros
-    py_binding_tools
-    pybind11_catkin
     pluginlib
     roscpp
     transmission_interface
     urdf
   )
+
+  if(BUILD_PYTHON_BINDINGS)
+    find_package(py_binding_tools QUIET)
+    if(NOT py_binding_tools_FOUND)
+      message(FATAL_ERROR
+        "py_binding_tools was not found. Install it, or disable the Python "
+        "bindings by configuring with -DBUILD_PYTHON_BINDINGS=OFF.")
+    endif()
+    find_package(pybind11_catkin REQUIRED)
+  endif()
 
   catkin_python_setup()
 
@@ -49,7 +59,6 @@ if(ROS_VERSION EQUAL 1)
       hardware_interface
       joint_limits_interface
       mujoco_ros
-      py_binding_tools
       pluginlib
       roscpp
       transmission_interface
@@ -62,6 +71,8 @@ if(ROS_VERSION EQUAL 1)
   )
   target_include_directories(${PROJECT_NAME} PUBLIC
     include
+  )
+  target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
     ${catkin_INCLUDE_DIRS}
   )
   target_link_libraries(${PROJECT_NAME}
@@ -73,6 +84,8 @@ if(ROS_VERSION EQUAL 1)
   )
   target_include_directories(default_mujoco_ros_robot_hw_sim PUBLIC
     include
+  )
+  target_include_directories(default_mujoco_ros_robot_hw_sim SYSTEM PRIVATE
     ${catkin_INCLUDE_DIRS}
   )
   target_link_libraries(default_mujoco_ros_robot_hw_sim
@@ -101,7 +114,9 @@ if(ROS_VERSION EQUAL 1)
     OPTIONAL
   )
 
-  add_subdirectory(python/bindings)
+  if(BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python/bindings)
+  endif()
 
   if(CATKIN_ENABLE_TESTING)
     add_subdirectory(test)
@@ -113,16 +128,23 @@ elseif(ROS_VERSION EQUAL 2)
   find_package(hardware_interface REQUIRED)
   find_package(lifecycle_msgs REQUIRED)
   find_package(mujoco_ros REQUIRED)
-  find_package(py_binding_tools REQUIRED)
-  find_package(pybind11_vendor REQUIRED)
-  find_package(pybind11 REQUIRED)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-  if(NOT PYTHON_INSTALL_DIR)
-    execute_process(
-      COMMAND ${Python3_EXECUTABLE} -c "import os, sysconfig; print(sysconfig.get_path('platlib', vars={'base': '', 'platbase': ''}).lstrip(os.sep))"
-      OUTPUT_VARIABLE PYTHON_INSTALL_DIR
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+  if(BUILD_PYTHON_BINDINGS)
+    find_package(py_binding_tools QUIET)
+    if(NOT py_binding_tools_FOUND)
+      message(FATAL_ERROR
+        "py_binding_tools was not found. Install it, or disable the Python "
+        "bindings by configuring with -DBUILD_PYTHON_BINDINGS=OFF.")
+    endif()
+    find_package(pybind11_vendor REQUIRED)
+    find_package(pybind11 REQUIRED)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    if(NOT PYTHON_INSTALL_DIR)
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import os, sysconfig; print(sysconfig.get_path('platlib', vars={'base': '', 'platbase': ''}).lstrip(os.sep))"
+        OUTPUT_VARIABLE PYTHON_INSTALL_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    endif()
   endif()
   find_package(pluginlib REQUIRED)
   find_package(rclcpp REQUIRED)
@@ -185,7 +207,9 @@ elseif(ROS_VERSION EQUAL 2)
     DESTINATION share/${PROJECT_NAME}
   )
 
-  add_subdirectory(python/bindings)
+  if(BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python/bindings)
+  endif()
   ament_python_install_package(${PROJECT_NAME} PACKAGE_DIR python/src/${PROJECT_NAME})
 
   if(BUILD_TESTING)
@@ -199,12 +223,13 @@ elseif(ROS_VERSION EQUAL 2)
     hardware_interface
     lifecycle_msgs
     mujoco_ros
-    py_binding_tools
-    pybind11_vendor
     pluginlib
     rclcpp
     rclcpp_lifecycle
   )
+  if(BUILD_PYTHON_BINDINGS)
+    ament_export_dependencies(py_binding_tools pybind11_vendor)
+  endif()
 
   ament_package()
 endif()

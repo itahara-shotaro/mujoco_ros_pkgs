@@ -2,6 +2,7 @@
  * Software License Agreement (BSD 3-Clause License)
  *
  *  Copyright (c) 2022-2026, Bielefeld University
+ *  Copyright (c) 2026, Neura Robotics
  *  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -14,7 +15,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Bielefeld University nor the names of its
+ *   * Neither the name of Bielefeld University nor Neura Robotics nor the names of their
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -51,6 +52,7 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -185,7 +187,7 @@ MessageConstPtr<LaserScanMsg> wait_for_scan_message(MujocoEnvTestWrapper *env_pt
 	auto sub = subscribe_to<LaserScanMsg>(env_ptr, nh, scan_topic_name(env_ptr), 10,
 	                                      [&message](const MessageConstPtr<LaserScanMsg> &msg) { message = msg; });
 
-	env_ptr->settings_.run.store(0);
+	env_ptr->togglePaused(true);
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 	while (message == nullptr && std::chrono::steady_clock::now() < deadline) {
 		env_ptr->step(25);
@@ -213,7 +215,6 @@ class LoadedPluginFixture : public ::testing::TestWithParam<int>
 protected:
 	std::unique_ptr<testing::TestNodeHandle> nh;
 	std::unique_ptr<MujocoEnvTestWrapper> env_ptr;
-	LaserPlugin *laser_plugin = nullptr;
 
 	void SetUp() override
 	{
@@ -227,7 +228,7 @@ protected:
 		env_ptr = std::make_unique<MujocoEnvTestWrapper>("", nh.get());
 
 		const std::string xml_path = get_laser_model_path();
-		env_ptr->StartWithXML(xml_path, false);
+		env_ptr->StartWithXML(xml_path);
 
 		float seconds = 0;
 		while (env_ptr->GetOperationalStatus() != 0 && seconds < 2) {
@@ -236,19 +237,20 @@ protected:
 		}
 		ASSERT_EQ(env_ptr->getFilename(), xml_path) << "Model was not loaded correctly!";
 
-		for (const auto &plugin : env_ptr->GetPlugins()) {
-			laser_plugin = dynamic_cast<LaserPlugin *>(plugin.get());
-			if (laser_plugin != nullptr) {
-				break;
-			}
-		}
+		ASSERT_EQ(env_ptr->GetPluginStats().size(), 1u);
+		ASSERT_EQ(env_ptr->GetNumCBReadyPlugins(), 1);
 	}
 
 	void TearDown() override
 	{
-		laser_plugin = nullptr;
 		if (env_ptr != nullptr) {
 			env_ptr->shutdown();
+			// Destroy the environment before clearing its parameters.  shutdown()
+			// joins the simulation threads, but the ROS 2 executor and MuJoCo
+			// threadpool are owned by the environment until its destructor runs.
+			// Keeping it alive while removing parameters lets a late callback from
+			// the previous fixture race with the next parameterized instance.
+			env_ptr.reset();
 		}
 		if (nh != nullptr) {
 			clear_test_params(*nh);
@@ -258,7 +260,7 @@ protected:
 
 TEST_P(LoadedPluginFixture, PluginLoaded)
 {
-	EXPECT_NE(laser_plugin, nullptr) << "Plugin loading failed!";
+	EXPECT_EQ(env_ptr->GetPluginStats().front().type, "mujoco_ros_laser/LaserPlugin") << "Plugin loading failed!";
 }
 
 TEST_P(LoadedPluginFixture, ScanTopicCreated)
@@ -270,12 +272,12 @@ TEST_P(LoadedPluginFixture, ScanTopicCreated)
 
 TEST_P(LoadedPluginFixture, ThreadpoolModeMatchesConfiguration)
 {
-	const bool has_threadpool = static_cast<bool>(env_ptr->getDataPtr()->threadpool);
-	if (GetParam() > 1) {
-		EXPECT_TRUE(has_threadpool) << "Expected MuJoCo threadpool for multithreaded laser execution";
-	} else {
-		EXPECT_FALSE(has_threadpool) << "Expected single-threaded laser execution";
-	}
+	const bool has_threadpool           = static_cast<bool>(env_ptr->getDataPtr()->threadpool);
+	const unsigned int hardware_threads = std::thread::hardware_concurrency();
+	const int available_threads         = hardware_threads > 1 ? static_cast<int>(hardware_threads - 1) : 0;
+	const int effective_threads         = std::min(GetParam(), available_threads);
+	EXPECT_EQ(has_threadpool, effective_threads > 1) << "Unexpected MuJoCo threadpool state for requested " << GetParam()
+	                                                 << " and effective " << effective_threads << " threads";
 }
 
 TEST_P(LoadedPluginFixture, PublishesLaserScan)

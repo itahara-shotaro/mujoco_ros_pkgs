@@ -280,9 +280,8 @@ class MocapPluginFixture : public ::testing::Test
 protected:
 	std::unique_ptr<testing::TestNodeHandle> nh;
 	std::unique_ptr<MujocoEnvTestWrapper> env_ptr;
-	mujoco_ros::mocap::MocapPlugin *mocap_plugin = nullptr;
-	mjModel *m                                   = nullptr;
-	mjData *d                                    = nullptr;
+	mjModel *m = nullptr;
+	mjData *d  = nullptr;
 
 	void SetUp() override
 	{
@@ -295,7 +294,7 @@ protected:
 		env_ptr = std::make_unique<MujocoEnvTestWrapper>("", nh.get());
 
 		const std::string xml_path = get_mocap_model_path();
-		env_ptr->StartWithXML(xml_path, false);
+		env_ptr->StartWithXML(xml_path);
 
 		float seconds = 0;
 		while (env_ptr->GetOperationalStatus() != 0 && seconds < 2) {
@@ -307,17 +306,12 @@ protected:
 		m = env_ptr->getModelPtr();
 		d = env_ptr->getDataPtr();
 
-		for (const auto &plugin : env_ptr->GetPlugins()) {
-			mocap_plugin = dynamic_cast<mujoco_ros::mocap::MocapPlugin *>(plugin.get());
-			if (mocap_plugin != nullptr) {
-				break;
-			}
-		}
+		ASSERT_EQ(env_ptr->GetPluginStats().size(), 1u);
+		ASSERT_EQ(env_ptr->GetNumCBReadyPlugins(), 1);
 	}
 
 	void TearDown() override
 	{
-		mocap_plugin = nullptr;
 		if (env_ptr != nullptr) {
 			env_ptr->shutdown();
 		}
@@ -329,7 +323,7 @@ protected:
 
 TEST_F(MocapPluginFixture, PluginLoaded)
 {
-	EXPECT_NE(mocap_plugin, nullptr);
+	EXPECT_EQ(env_ptr->GetPluginStats().front().type, "mujoco_ros_mocap/MocapPlugin");
 }
 
 TEST_F(MocapPluginFixture, TopicAndServiceCreated)
@@ -347,7 +341,7 @@ TEST_F(MocapPluginFixture, ServiceUpdatesMocapPose)
 	ASSERT_TRUE(call_set_mocap_state(env_ptr.get(), srv));
 	EXPECT_TRUE(srv.response.success);
 
-	env_ptr->settings_.run.store(0);
+	env_ptr->togglePaused(true);
 	ASSERT_TRUE(env_ptr->step());
 
 	const int mocap_id = mocap_id_for_body(m, "mocap");
@@ -359,7 +353,17 @@ TEST_F(MocapPluginFixture, TopicUpdatesMocapPose)
 	const MocapState state = make_mocap_state("mocap2", "world", 0.4, 0.5, 0.6, 1.0);
 	publish_mocap_state(env_ptr.get(), nh.get(), state);
 
-	env_ptr->settings_.run.store(0);
+	float seconds = 0;
+	while (env_ptr->GetOperationalStatus() != 0 && seconds < 2) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		seconds += 0.001f;
+	}
+	m = env_ptr->getModelPtr();
+	d = env_ptr->getDataPtr();
+	ASSERT_NE(m, nullptr);
+	ASSERT_NE(d, nullptr);
+
+	env_ptr->togglePaused(true);
 	for (int i = 0; i < 10; ++i) {
 		ASSERT_TRUE(env_ptr->step());
 	}

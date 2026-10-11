@@ -37,8 +37,11 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <functional>
 #include <iomanip>
+#include <stdexcept>
 #include <sstream>
+#include <utility>
 
 #include <mujoco_ros/ros_version.hpp>
 
@@ -606,25 +609,28 @@ public:
 	MujocoEnvTestWrapper(ros::NodeHandle * /*test_nh*/) : MujocoEnvTestWrapper("") {}
 #else // MJR_ROS_VERSION == ROS_2
 	MujocoEnvTestWrapper(const std::string &admin_hash = std::string(), testing::TestNodeHandle *test_nh = nullptr)
-	    : MujocoEnv(std::make_shared<rclcpp::executors::MultiThreadedExecutor>(), admin_hash, false)
+	    : MujocoEnv(std::make_shared<rclcpp::executors::SingleThreadedExecutor>(), admin_hash, false)
 	    , test_nh_(test_nh)
 	    , construction_complete_(false)
 	{
 		GetExecutorPtr()->add_node(this->get_node_base_interface());
 
-		// Start executor thread BEFORE Configure() so services and callbacks have a spinning executor
-		executor_thread_handle_ = std::thread([this]() { GetExecutorPtr()->spin(); });
-
-		// Give executor thread a moment to start spinning
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
 		try {
 			test_nh_->setNode(this);
 			Configure();
-			construction_complete_ = true;
+			executor_thread_handle_ = std::thread([this]() {
+				while (!shutdown_called_.load()) {
+					GetExecutorPtr()->spin_once(std::chrono::milliseconds(10));
+				}
+			});
+			construction_complete_  = true;
 		} catch (...) {
 			MJR_ERROR("Exception thrown during MujocoEnvTestWrapper construction! Cleaning up executor...");
-			// Stop executor and join thread BEFORE removing node to avoid races
+			// Stop executor and join thread BEFORE removing node to avoid races.
+			// Must set shutdown_called_ first: the executor thread's poll loop only
+			// exits on that flag, not on cancel() alone. executor_thread_handle_ is
+			// only joinable here if the thread was created above before the throw.
+			shutdown_called_.store(true);
 			GetExecutorPtr()->cancel();
 			if (executor_thread_handle_.joinable()) {
 				executor_thread_handle_.join();
@@ -641,8 +647,10 @@ public:
 			// Only perform cleanup if construction completed successfully
 			// If construction failed, base class destructor will handle cleanup
 			if (construction_complete_) {
-				test_nh_->clearNode();
 				shutdown();
+				if (test_nh_ != nullptr) {
+					test_nh_->clearNode();
+				}
 			}
 		} catch (const std::exception &e) {
 			MJR_ERROR_STREAM("Exception during shutdown in destructor: " << e.what());
@@ -670,22 +678,48 @@ public:
 	void setEvalMode(bool eval_mode) { settings_.eval_mode = eval_mode; }
 	void setAdminHash(const std::string &hash) { mju::strcpy_arr(settings_.admin_hash, hash.c_str()); }
 
-	std::string getFilename() { return { filename_ }; }
+	std::string getFilename()
+	{
+		std::lock_guard<MujocoEnvMutex> lock(physics_thread_mutex_);
+		return std::string(filename_);
+	}
 	int isPhysicsRunning() { return is_physics_running_; }
 	int isEventRunning() { return is_event_running_; }
 	int isRenderingRunning() { return is_rendering_running_; }
 
-	OffscreenRenderContext *getOffscreenContext() { return &offscreen_; }
+	CameraPublicationTransport *getCameraPublicationTransport() { return &camera_publication_transport_; }
 
-	std::vector<MujocoPluginPtr> const &GetPlugins() const { return MujocoEnv::GetPlugins(); }
+	template <typename Plugin, typename Func>
+	decltype(auto) WithBackendPlugin(const std::string &name, const std::string &type, Func &&func)
+	{
+		return WithPluginAccess([&](const ScopedPluginAccess &access) -> decltype(auto) {
+			auto *plugin = static_cast<Plugin *>(access.Adapter(name, type)->BackendObject());
+			if (plugin == nullptr) {
+				throw std::runtime_error("plugin backend object is missing");
+			}
+			return std::invoke(std::forward<Func>(func), plugin);
+		});
+	}
 
-	int GetNumCBReadyPlugins() { return cb_ready_plugins_.size(); }
+	int GetNumCBReadyPlugins() const { return static_cast<int>(plugin_host_->ReadyCount()); }
 	void NotifyGeomChange() { NotifyGeomChanged(0); }
 
 	bool step(int num_steps = 1, bool blocking = true) { return MujocoEnv::Step(num_steps, blocking); }
 	bool togglePaused(bool paused, const std::string &admin_hash = std::string())
 	{
 		return TogglePaused(paused, admin_hash);
+	}
+	bool isRunning() const { return GetControlSnapshot().running; }
+	int pendingManualSteps() const { return GetControlSnapshot().pending_steps; }
+	bool isResetRequested() const { return GetControlSnapshot().reset_requested; }
+	bool isShutdownRequested() const { return GetControlSnapshot().shutdown_requested; }
+	int loadRequest() const { return GetControlSnapshot().load_request; }
+	void requestReset() { RequestReset(); }
+	void requestShutdown() { RequestShutdown(); }
+	void requestLoad(int load_request) { RequestLoad(load_request); }
+	void SetReloadObserver(std::function<void(MujocoEnv::ReloadPhase)> observer)
+	{
+		reload_observer_ = std::move(observer);
 	}
 	int GetOperationalStatus() { return MujocoEnv::GetOperationalStatus(); }
 	void StartPhysicsLoop() { MujocoEnv::StartPhysicsLoop(); }
@@ -695,8 +729,8 @@ public:
 
 	void load_queued_model()
 	{
-		settings_.load_request = 2;
-		float seconds          = 0;
+		requestLoad(2);
+		float seconds = 0;
 		while (GetOperationalStatus() != 0 && seconds < 2) { // wait for model to be loaded or timeout
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			seconds += 0.001;
@@ -720,17 +754,31 @@ public:
 
 		// Only clean up physics threads if construction completed successfully
 		if (construction_complete_) {
-			settings_.exit_request = 1;
+			requestShutdown();
 			MujocoEnv::WaitForPhysicsJoin();
 			MujocoEnv::WaitForEventsJoin();
+			if (plugin_host_) {
+				plugin_host_->QuiesceAndDestroy();
+			}
+			// Drain camera/consumer aliases, then join RenderCore before the ROS executor
+			// goes away. Leaving the render thread alive across executor cancel has wedged
+			// the next Configure under GLFW+OSMESA (CI mujoco_env_test timeout).
+			QuiesceRenderCoreForTeardown();
 		}
 
 #if MJR_ROS_VERSION == ROS_2
+		// Stop the executor before TF members are destroyed (natural ~MujocoEnv order
+		// destroys executor_ before tf_*). Do not eagerly reset TF here — that path
+		// regressed ROS1/DISABLE cells while the original hang was executor-vs-TF and
+		// RenderCore lifetime, not manual tf_*.reset().
 		if (GetExecutorPtr() != nullptr) {
 			GetExecutorPtr()->cancel();
 		}
 		if (executor_thread_handle_.joinable()) {
 			executor_thread_handle_.join();
+		}
+		if (construction_complete_ && GetExecutorPtr() != nullptr) {
+			GetExecutorPtr()->remove_node(this->get_node_base_interface());
 		}
 #endif
 	}
@@ -747,7 +795,12 @@ public:
 	void StartWithXML(const std::string &xml_path, bool wait = true, float timeout_secs = 2.)
 	{
 		mju::strcpy_arr(queued_filename_, xml_path.c_str());
-		settings_.load_request = 2;
+		uint load_count_before;
+		{
+			std::lock_guard<MujocoEnvMutex> lock(physics_thread_mutex_);
+			load_count_before = sim_state_.load_count;
+		}
+		requestLoad(2);
 		MujocoEnv::StartPhysicsLoop();
 		MujocoEnv::StartEventLoop();
 
@@ -756,7 +809,14 @@ public:
 
 		// Wait for model to be loaded
 		float seconds = 0;
-		while (GetOperationalStatus() != 0 && seconds < timeout_secs) { // wait for model to be loaded or timeout
+		while (seconds < timeout_secs) {
+			if (GetOperationalStatus() == 0) {
+				std::lock_guard<MujocoEnvMutex> lock(physics_thread_mutex_);
+				const bool load_count_increased = sim_state_.load_count > load_count_before;
+				if (load_count_increased && sim_state_.model_valid && std::string(filename_) == xml_path) {
+					break;
+				}
+			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			seconds += 0.001;
 		}
@@ -765,6 +825,17 @@ public:
 #if MJR_ROS_VERSION == ROS_2
 	std::thread executor_thread_handle_;
 #endif
+
+protected:
+	void OnReloadPhase(MujocoEnv::ReloadPhase phase) override
+	{
+		if (reload_observer_) {
+			reload_observer_(phase);
+		}
+	}
+
+private:
+	std::function<void(MujocoEnv::ReloadPhase)> reload_observer_;
 };
 
 class BaseEnvFixture : public ::testing::Test
@@ -787,6 +858,10 @@ protected:
 	{
 		if (env_ptr != nullptr) {
 			env_ptr->shutdown();
+			// Destroy before the next test constructs a new env. unique_ptr
+			// assignment constructs the new object first, so skipping reset()
+			// leaves two MujocoEnvs (GLFW offscreen + ROS nodes) alive together.
+			env_ptr.reset();
 		}
 #if MJR_ROS_VERSION == ROS_1
 		// clean up all parameters
@@ -832,7 +907,10 @@ protected:
 
 	void TearDown() override
 	{
-		env_ptr->shutdown();
+		if (env_ptr != nullptr) {
+			env_ptr->shutdown();
+			env_ptr.reset();
+		}
 #if MJR_ROS_VERSION == ROS_1
 		// clean up all parameters
 		ros::param::del(nh->getNamespace());
@@ -883,11 +961,17 @@ protected:
 		m = env_ptr->getModelPtr();
 		d = env_ptr->getDataPtr();
 
-		EXPECT_FALSE(env_ptr->settings_.run) << "Simulation should be paused!";
+		EXPECT_FALSE(env_ptr->GetControlSnapshot().running) << "Simulation should be paused!";
 		EXPECT_NEAR(d->time, 0, 1e-6) << "Simulation time should be 0.0!";
 		EXPECT_TRUE(testing::wait_for_service(env_ptr->GetHandleNamespace() + "/set_eq_constraint_parameters"))
 		    << "Set eq constraints service should be available!";
 	}
 
-	void TearDown() override { env_ptr->shutdown(); }
+	void TearDown() override
+	{
+		if (env_ptr != nullptr) {
+			env_ptr->shutdown();
+			env_ptr.reset();
+		}
+	}
 };

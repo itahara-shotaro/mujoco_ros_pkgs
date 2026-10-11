@@ -6,7 +6,7 @@ The project uses a hybrid ROS 1 / ROS 2 layout where shared MuJoCo behavior
 lives in one implementation and ROS-version-specific code is isolated at the
 boundary.
 
-The 1.0.0 release line supports ROS 1 Noetic/One-style builds and ROS 2
+The 2.0.0 release line supports ROS 1 Noetic/One-style builds and ROS 2
 Humble-style builds from the same repository.
 
 ### Continuous Integration
@@ -131,6 +131,8 @@ the `ignore_actuators` generalized-force fallback mode.
 The documentation is published at
 [ubi-agni.github.io/mujoco_ros_pkgs](https://ubi-agni.github.io/mujoco_ros_pkgs/).
 The Sphinx sources live under `docs/`.
+The Extended Params schema reference lives at
+`docs/concepts/robot_description/robot_description.rst`.
 
 ## Licensing
 

@@ -34,7 +34,9 @@ struct Glfw
 	// go/keep-sorted start
 	mjGLFW_DECLARE_SYMBOL(glfwCreateWindow);
 	mjGLFW_DECLARE_SYMBOL(glfwDestroyWindow);
+	mjGLFW_DECLARE_SYMBOL(glfwGetCurrentContext);
 	mjGLFW_DECLARE_SYMBOL(glfwGetCursorPos);
+	mjGLFW_DECLARE_SYMBOL(glfwGetError);
 	mjGLFW_DECLARE_SYMBOL(glfwGetFramebufferSize);
 	mjGLFW_DECLARE_SYMBOL(glfwGetKey);
 	mjGLFW_DECLARE_SYMBOL(glfwGetMonitorPhysicalSize);
@@ -55,15 +57,19 @@ struct Glfw
 	mjGLFW_DECLARE_SYMBOL(glfwSetKeyCallback);
 	mjGLFW_DECLARE_SYMBOL(glfwSetMouseButtonCallback);
 	mjGLFW_DECLARE_SYMBOL(glfwSetScrollCallback);
+	mjGLFW_DECLARE_SYMBOL(glfwSetWindowIcon);
 	mjGLFW_DECLARE_SYMBOL(glfwSetWindowMonitor);
 	mjGLFW_DECLARE_SYMBOL(glfwSetWindowRefreshCallback);
+	mjGLFW_DECLARE_SYMBOL(glfwSetWindowSize);
 	mjGLFW_DECLARE_SYMBOL(glfwSetWindowSizeCallback);
 	mjGLFW_DECLARE_SYMBOL(glfwSetWindowTitle);
+	mjGLFW_DECLARE_SYMBOL(glfwShowWindow);
 	mjGLFW_DECLARE_SYMBOL(glfwSetWindowUserPointer);
 	mjGLFW_DECLARE_SYMBOL(glfwSwapBuffers);
 	mjGLFW_DECLARE_SYMBOL(glfwSwapInterval);
 	mjGLFW_DECLARE_SYMBOL(glfwTerminate);
 	mjGLFW_DECLARE_SYMBOL(glfwWindowHint);
+	mjGLFW_DECLARE_SYMBOL(glfwWindowHintString);
 	mjGLFW_DECLARE_SYMBOL(glfwWindowShouldClose);
 	// go/keep-sorted end
 

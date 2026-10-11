@@ -1,0 +1,17 @@
+# MuJoCo is provided by the `mujoco` catkin package (e.g. mujoco_catkin), so downstream packages
+# only need `catkin build` without pointing MUJOCO_DIR at an external installation.
+find_package(mujoco REQUIRED)
+
+if(NOT TARGET mujoco::mujoco)
+  add_library(mujoco::mujoco INTERFACE IMPORTED GLOBAL)
+  set_target_properties(mujoco::mujoco PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${mujoco_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${mujoco_LIBRARIES}"
+  )
+endif()
+
+if("@_MUJOCO_RESOLVED_OFFSCREEN_BACKEND@" STREQUAL "OSMESA")
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+  find_package(OSMesa REQUIRED)
+  list(POP_BACK CMAKE_MODULE_PATH)
+endif()
