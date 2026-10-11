@@ -1,0 +1,34 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+    - Class: rviz/PointCloud2
+      Name: Mid360
+      Enabled: true
+      Topic: /livox/lidar
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Autocompute Value Bounds: true
+      Decay Time: 0
+      Queue Size: 10
+  Global Options:
+    Fixed Frame: livox_frame
+    Frame Rate: 30
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 15
+      Pitch: 0.6
+      Yaw: 0.8
+      Target Frame: <Fixed Frame>

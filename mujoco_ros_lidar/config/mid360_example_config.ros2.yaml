@@ -1,0 +1,24 @@
+/mujoco_server:
+  ros__parameters:
+    MujocoPlugins.names:
+      - mujoco_ros_lidar
+    MujocoPlugins.mujoco_ros_lidar.type: mujoco_ros_lidar/LidarPlugin
+    MujocoPlugins.mujoco_ros_lidar.sensors:
+      - mid360
+    MujocoPlugins.mujoco_ros_lidar.mid360.site_attached: mid360_site
+    MujocoPlugins.mujoco_ros_lidar.mid360.name: livox/lidar
+    MujocoPlugins.mujoco_ros_lidar.mid360.frame_id: livox_frame
+    MujocoPlugins.mujoco_ros_lidar.mid360.scan_pattern: mid360
+    MujocoPlugins.mujoco_ros_lidar.mid360.update_rate: 10.0
+    MujocoPlugins.mujoco_ros_lidar.mid360.points_per_frame: 20000
+    MujocoPlugins.mujoco_ros_lidar.mid360.min_range: 0.1
+    MujocoPlugins.mujoco_ros_lidar.mid360.max_range: 40.0
+    MujocoPlugins.mujoco_ros_lidar.mid360.range_std: 0.02
+    MujocoPlugins.mujoco_ros_lidar.mid360.min_elevation: -0.1222
+    MujocoPlugins.mujoco_ros_lidar.mid360.max_elevation: 0.9076
+    MujocoPlugins.mujoco_ros_lidar.mid360.num_lines: 4
+    MujocoPlugins.mujoco_ros_lidar.mid360.intensity_source: color
+    MujocoPlugins.mujoco_ros_lidar.mid360.visualize: false
+    MujocoPlugins.mujoco_ros_lidar.mid360.imu_site: mid360_imu
+    MujocoPlugins.mujoco_ros_lidar.mid360.imu_name: livox/imu
+    MujocoPlugins.mujoco_ros_lidar.mid360.imu_rate: 200.0

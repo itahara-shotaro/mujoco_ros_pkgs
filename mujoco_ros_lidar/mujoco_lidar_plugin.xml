@@ -1,0 +1,10 @@
+<library path="lib/libmujoco_ros_lidar">
+  <class
+    name="mujoco_ros_lidar/LidarPlugin"
+    type="mujoco_ros::sensors::lidar::LidarPlugin"
+    base_class_type="mujoco_ros::MujocoPlugin">
+    <description>
+      MuJoCo ROS 3D LiDAR plugin publishing sensor_msgs/PointCloud2 (Livox Mid-360 style)
+    </description>
+  </class>
+</library>
