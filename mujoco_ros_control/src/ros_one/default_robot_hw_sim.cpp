@@ -342,7 +342,15 @@ void DefaultRobotHWSim::GetJointData(const int &joint_id, double &position, doub
 {
 	position = d_ptr_->qpos[m_ptr_->jnt_qposadr[joint_id]];
 	velocity = d_ptr_->qvel[m_ptr_->jnt_dofadr[joint_id]];
-	effort   = d_ptr_->qfrc_applied[m_ptr_->jnt_dofadr[joint_id]] + d_ptr_->qfrc_actuator[m_ptr_->jnt_dofadr[joint_id]];
+	effort   = d_ptr_->qfrc_applied[m_ptr_->jnt_dofadr[joint_id]];
+	// Only add the actuators that drive this joint. qfrc_actuator also contains the generalized forces of
+	// actuators acting on descendant bodies (e.g. site-transmission rotor thrusts), which are not exerted by
+	// the joint actuator.
+	for (int a = 0; a < m_ptr_->nu; ++a) {
+		if (m_ptr_->actuator_trntype[a] == mjTRN_JOINT && m_ptr_->actuator_trnid[2 * a] == joint_id) {
+			effort += m_ptr_->actuator_gear[6 * a] * d_ptr_->actuator_force[a];
+		}
+	}
 }
 
 int DefaultRobotHWSim::GetActuatorId(const std::string &joint_name, const std::string &suffix) const
