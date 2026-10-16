@@ -65,6 +65,7 @@ bool DefaultRobotHWSim::InitSim(const mjModel *m_ptr, mjData *d_ptr, MujocoEnv *
 	m_ptr_            = m_ptr;
 	d_ptr_            = d_ptr;
 	ignore_actuators_ = ignore_actuators;
+	model_nh.param<std::string>("simulation/model_prefix", model_prefix_, "");
 
 	// Resize vectors to our DOF
 	n_dof_ = transmissions.size();
@@ -189,7 +190,7 @@ bool DefaultRobotHWSim::InitSim(const mjModel *m_ptr, mjData *d_ptr, MujocoEnv *
 			                                                  << joint_names_[j]);
 		}
 
-		int joint_id = mujoco_ros::util::jointName2id(const_cast<mjModel *>(m_ptr), joint_names_[j]);
+		int joint_id = mujoco_ros::util::jointName2id(const_cast<mjModel *>(m_ptr), model_prefix_ + joint_names_[j]);
 		if (joint_id < 0) {
 			ROS_ERROR_STREAM_NAMED("default_robot_hw_sim", "This robot has a joint named '"
 			                                                   << joint_names_[j]
@@ -347,7 +348,7 @@ void DefaultRobotHWSim::GetJointData(const int &joint_id, double &position, doub
 
 int DefaultRobotHWSim::GetActuatorId(const std::string &joint_name, const std::string &suffix) const
 {
-	return mj_name2id(m_ptr_, mjOBJ_ACTUATOR, (joint_name + suffix).c_str());
+	return mj_name2id(m_ptr_, mjOBJ_ACTUATOR, (model_prefix_ + joint_name + suffix).c_str());
 }
 
 void DefaultRobotHWSim::DisableActuator(int actuator_id) const

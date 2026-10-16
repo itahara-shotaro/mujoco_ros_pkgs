@@ -124,6 +124,8 @@ protected:
 	joint_limits_interface::VelocityJointSaturationInterface vj_sat_interface_;
 	joint_limits_interface::VelocityJointSoftLimitsInterface vj_limits_interface_;
 
+	// MuJoCo object names may be prefixed; ROS joints and PID gain paths stay local.
+	std::string model_prefix_;
 	std::vector<std::string> joint_names_;
 	std::vector<int> joint_types_;
 	std::vector<double> joint_lower_limits_;
