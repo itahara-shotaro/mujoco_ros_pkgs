@@ -42,6 +42,7 @@
 
 #include <mujoco_ros/mujoco_env.hpp>
 #include <mujoco_ros/ros_one/plugin_utils.hpp>
+#include <mujoco_ros/ros_one/initial_joint_states.hpp>
 
 #include <mujoco/mujoco.h>
 #include <mujoco_ros/array_safety.h>
@@ -159,59 +160,25 @@ void MujocoEnv::GetCameraConfiguration(const std::string &cam_name, rendering::S
 
 void MujocoEnv::GetInitialJointPositions(std::map<std::string, std::vector<double>> &joint_pos_map)
 {
-	std::map<std::string, std::string> joint_map;
-	nh_->getParam("initial_joint_positions/joint_map", joint_map);
-
-	// This check only assures that there aren't single axis joint values that are non-strings.
-	// One ill-defined value among correct parameters can't be detected.
-	if (nh_->hasParam("initial_joint_positions/joint_map") && joint_map.empty()) {
-		MJR_WARN("Initial joint positions not recognized by rosparam server. Check your config, "
-		         "especially values for single axis joints should explicitly provided as string!");
+	XmlRpc::XmlRpcValue values;
+	if (!nh_->getParam("initial_joint_positions/joint_map", values)) {
 		return;
 	}
-
-	for (auto const &[name, str_values] : joint_map) {
-		MJR_DEBUG_STREAM("fetched jointpos values of joint " << name << ": " << str_values);
-
-		std::vector<double> axis_vals;
-		axis_vals.reserve(7);
-
-		std::stringstream stream_values(str_values);
-		std::string value;
-		while (std::getline(stream_values, value, ' ')) {
-			axis_vals.push_back(std::stod(value));
-		}
-		axis_vals.shrink_to_fit();
-		joint_pos_map[name] = axis_vals;
+	std::string error;
+	if (!detail::ParseInitialJointMap(values, joint_pos_map, error)) {
+		MJR_WARN_STREAM("Initial joint positions not recognized: " << error);
 	}
 }
 
 void MujocoEnv::GetInitialJointVelocities(std::map<std::string, std::vector<double>> &joint_vel_map)
 {
-	std::map<std::string, std::string> joint_map;
-	nh_->getParam("initial_joint_velocities/joint_map", joint_map);
-
-	// This check only assures that there aren't single axis joint values that are non-strings.
-	// One ill-defined value among correct parameters can't be detected.
-	if (nh_->hasParam("initial_joint_velocities/joint_map") && joint_map.empty()) {
-		MJR_WARN("Initial joint velocities not recognized by rosparam server. Check your config, "
-		         "especially values for single axis joints should explicitly provided as string!");
+	XmlRpc::XmlRpcValue values;
+	if (!nh_->getParam("initial_joint_velocities/joint_map", values)) {
 		return;
 	}
-
-	for (auto const &[name, str_values] : joint_map) {
-		MJR_DEBUG_STREAM("fetched jointvel values of joint " << name << ": " << str_values);
-
-		std::vector<double> axis_vals;
-		axis_vals.reserve(7);
-
-		std::stringstream stream_values(str_values);
-		std::string value;
-		while (std::getline(stream_values, value, ' ')) {
-			axis_vals.push_back(std::stod(value));
-		}
-		axis_vals.shrink_to_fit();
-		joint_vel_map[name] = axis_vals;
+	std::string error;
+	if (!detail::ParseInitialJointMap(values, joint_vel_map, error)) {
+		MJR_WARN_STREAM("Initial joint velocities not recognized: " << error);
 	}
 }
 
